@@ -51,6 +51,22 @@ interface TechnicalParams {
   qty: string;
   topPlate: PlateParams;
   bottomPlate: PlateParams;
+  handleOd: string;
+  handleThickness: string;
+  handleLength: string;
+  angleWeightPerM: string;
+  angleLength: string;
+  screwDia: string;
+  screwLength: string;
+  screwQty: string;
+  cuttingLength: string;
+  cutRate: string;
+  weldLength: string;
+  weldRate: string;
+  surfaceRate: string;
+  bendCount: string;
+  bendRate: string;
+  pressHits: string;
   processes: string[];
 }
 
@@ -75,6 +91,27 @@ interface ProcessDetail {
 interface EstimationResult {
   summary: CostSummary;
   processDetails: ProcessDetail[];
+  items?: Array<{
+    name: string;
+    quantity: number;
+    weightKg: number;
+    materialCost: number;
+    formulas?: Record<string, CalculationStep>;
+  }>;
+  assumptions?: string[];
+  calculationSteps?: CalculationStep[];
+  likelyUse?: string;
+  uploadedFile?: string;
+  fileSizeKb?: number;
+  surfaceTreatmentCost?: number;
+}
+
+interface CalculationStep {
+  section: string;
+  name: string;
+  formula: string;
+  substitutedValues: string;
+  result: string;
 }
 
 const DEFAULT_IMAGE_URL = 'https://lh3.googleusercontent.com/aida-public/AB6AXuC6yHgi_tmLsGYwxsl0yhWtA48tW7SMCFS_Obqmn9bF65XyFdgRv9FGPF-RmvkN3gONrEnhXZnDFDa05jyhn6iUs4O8Q3NsXysy84_Ov0aknOGe55wSI2xFe8jv54f4L84fLI5fGepe-d1WFiU30oeNpxwyDiXKpQRCOe49H81CLYOaq2yZbz0eJ94sC0oyYycyb8PYuhvoeNFooTfz4gpm9GBMx4Wii6LJN8x3SKTWsvmmkgnry9pCB9pOBdy6u6Ul2tHYcPwZBVw';
@@ -116,6 +153,22 @@ export default function App() {
     qty: '1',
     topPlate: { length: '', width: '', thickness: '' },
     bottomPlate: { length: '', width: '', thickness: '' },
+    handleOd: '',
+    handleThickness: '',
+    handleLength: '',
+    angleWeightPerM: '',
+    angleLength: '',
+    screwDia: '',
+    screwLength: '',
+    screwQty: '',
+    cuttingLength: '',
+    cutRate: '30',
+    weldLength: '',
+    weldRate: '400',
+    surfaceRate: '120',
+    bendCount: '',
+    bendRate: '5',
+    pressHits: '0',
     processes: []
   });
 
@@ -243,6 +296,22 @@ export default function App() {
         qty: '1',
         topPlate: { length: '80', width: '80', thickness: '8' },
         bottomPlate: { length: '110', width: '110', thickness: '12' },
+        handleOd: '19',
+        handleThickness: '2',
+        handleLength: '288',
+        angleWeightPerM: '2.42',
+        angleLength: '150',
+        screwDia: '20',
+        screwLength: '45',
+        screwQty: '4',
+        cuttingLength: '4049',
+        cutRate: '30',
+        weldLength: '780',
+        weldRate: '400',
+        surfaceRate: '120',
+        bendCount: '2',
+        bendRate: '5',
+        pressHits: '0',
         processes: ['Cutting', 'Welding', 'Surface', 'Bending']
       });
     } finally {
@@ -760,7 +829,7 @@ export default function App() {
                   <div className="space-y-4">
                     <div className="flex items-center gap-2 text-[#004ccd]">
                       <Scale className="w-4 h-4 text-[#004ccd]" />
-                      <h3 className="font-bold text-xs uppercase tracking-widest text-[#004ccd]">Main Profile / Rod</h3>
+                      <h3 className="font-bold text-xs uppercase tracking-widest text-[#004ccd]">Square Tube / Main Profile</h3>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <div className="space-y-1">
@@ -800,7 +869,7 @@ export default function App() {
 
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono text-xs">
                       <div className="space-y-1">
-                        <label className="text-xs font-sans font-semibold text-slate-500 uppercase tracking-wider">Length (mm)</label>
+                        <label className="text-xs font-sans font-semibold text-slate-500 uppercase tracking-wider">Length mm</label>
                         <input 
                           type="number"
                           className="w-full bg-slate-50 border border-[#c3c6d8] px-3 py-2 rounded focus:bg-white outline-none focus:border-[#004ccd] transition-all"
@@ -810,7 +879,7 @@ export default function App() {
                         />
                       </div>
                       <div className="space-y-1">
-                        <label className="text-xs font-sans font-semibold text-slate-500 uppercase tracking-wider">Diameter (mm)</label>
+                        <label className="text-xs font-sans font-semibold text-slate-500 uppercase tracking-wider">Outer / Diameter mm</label>
                         <input 
                           type="number"
                           className="w-full bg-slate-50 border border-[#c3c6d8] px-3 py-2 rounded focus:bg-white outline-none focus:border-[#004ccd] transition-all"
@@ -820,7 +889,7 @@ export default function App() {
                         />
                       </div>
                       <div className="space-y-1">
-                        <label className="text-xs font-sans font-semibold text-slate-500 uppercase tracking-wider">Thickness (mm)</label>
+                        <label className="text-xs font-sans font-semibold text-slate-500 uppercase tracking-wider">Thickness mm</label>
                         <input 
                           type="number"
                           className="w-full bg-slate-50 border border-[#c3c6d8] px-3 py-2 rounded focus:bg-white outline-none focus:border-[#004ccd] transition-all"
@@ -935,11 +1004,69 @@ export default function App() {
 
                   <div className="h-px bg-slate-200"></div>
 
-                  {/* SECTION 4: PROCESS DEFINITION */}
+                  {/* SECTION 4: HANDLE, SCREWS, AND CHAIR ANGLE */}
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 text-[#004ccd]">
+                      <Settings className="w-4 h-4 text-[#004ccd]" />
+                      <h3 className="font-bold text-xs uppercase tracking-widest text-[#004ccd]">Handle & Screwing Pieces</h3>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono text-xs">
+                      {[
+                        ['Handle OD', 'handleOd'],
+                        ['Handle thick', 'handleThickness'],
+                        ['Handle length', 'handleLength'],
+                        ['Angle kg/m', 'angleWeightPerM'],
+                        ['Angle length', 'angleLength'],
+                        ['Screw dia', 'screwDia'],
+                        ['Screw length', 'screwLength'],
+                        ['Screw qty', 'screwQty'],
+                      ].map(([label, key]) => (
+                        <div className="space-y-1" key={key}>
+                          <label className="text-xs font-sans font-semibold text-slate-500 uppercase tracking-wider">{label}</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            className="w-full bg-slate-50 border border-[#c3c6d8] px-3 py-2 rounded focus:bg-white outline-none focus:border-[#004ccd] transition-all"
+                            placeholder="-"
+                            value={String(params[key as keyof TechnicalParams] || '')}
+                            onChange={(e) => handleParamChange(key as keyof TechnicalParams, e.target.value)}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="h-px bg-slate-200"></div>
+
+                  {/* SECTION 5: PROCESS DEFINITION */}
                   <div className="space-y-4">
                     <div className="flex items-center gap-2 text-[#004ccd]">
                       <Wrench className="w-4 h-4 text-[#004ccd]" />
                       <h3 className="font-bold text-xs uppercase tracking-widest text-[#004ccd]">Process Definition</h3>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono text-xs">
+                      {[
+                        ['Total cut length mm', 'cuttingLength'],
+                        ['Cut rate INR/m', 'cutRate'],
+                        ['Weld length mm', 'weldLength'],
+                        ['Weld labor INR/m', 'weldRate'],
+                        ['Surface INR/m2', 'surfaceRate'],
+                        ['Bend count', 'bendCount'],
+                        ['Bend INR/stroke', 'bendRate'],
+                        ['Press hits', 'pressHits'],
+                      ].map(([label, key]) => (
+                        <div className="space-y-1" key={key}>
+                          <label className="text-xs font-sans font-semibold text-slate-500 uppercase tracking-wider">{label}</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            className="w-full bg-slate-50 border border-[#c3c6d8] px-3 py-2 rounded focus:bg-white outline-none focus:border-[#004ccd] transition-all"
+                            placeholder="-"
+                            value={String(params[key as keyof TechnicalParams] || '')}
+                            onChange={(e) => handleParamChange(key as keyof TechnicalParams, e.target.value)}
+                          />
+                        </div>
+                      ))}
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                       {[
@@ -1073,6 +1200,13 @@ export default function App() {
                           </div>
                         </div>
 
+                        {estimation.likelyUse && (
+                          <div className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1">
+                            <span className="text-[10px] uppercase font-bold text-slate-400">Likely Use</span>
+                            <p className="text-xs text-slate-600 leading-relaxed">{estimation.likelyUse}</p>
+                          </div>
+                        )}
+
                         {/* Calculations Breakdowns table */}
                         <div className="space-y-3">
                           <h5 className="font-bold text-xs text-slate-800 uppercase tracking-wider">Itemized Mass Distribution</h5>
@@ -1114,6 +1248,34 @@ export default function App() {
                             </table>
                           </div>
                         </div>
+
+                        {estimation.items && estimation.items.length > 0 && (
+                          <div className="space-y-3">
+                            <h5 className="font-bold text-xs text-slate-800 uppercase tracking-wider">Material Item Cost</h5>
+                            <div className="border border-slate-200 rounded overflow-hidden">
+                              <table className="w-full text-left text-xs border-collapse">
+                                <thead>
+                                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-400 uppercase font-mono text-[9px]">
+                                    <th className="p-2.5 font-bold">Item</th>
+                                    <th className="p-2.5 font-bold text-right">Qty</th>
+                                    <th className="p-2.5 font-bold text-right">Weight</th>
+                                    <th className="p-2.5 font-bold text-right">Material</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 font-mono text-slate-700">
+                                  {estimation.items.map((item, idx) => (
+                                    <tr key={`${item.name}-${idx}`}>
+                                      <td className="p-2.5 font-sans font-medium text-slate-900">{item.name}</td>
+                                      <td className="p-2.5 text-right">{item.quantity}</td>
+                                      <td className="p-2.5 text-right underline decoration-dotted underline-offset-4">{item.weightKg.toFixed(3)} kg</td>
+                                      <td className="p-2.5 text-right underline decoration-dotted underline-offset-4">{formatInr(item.materialCost)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
 
                         {/* Processing fee itemization */}
                         {estimation.processDetails.length > 0 && (
@@ -1162,6 +1324,31 @@ export default function App() {
                             <span className="font-mono text-[#004ccd]">{formatInr(estimation.summary.totalCost)}</span>
                           </div>
                         </div>
+
+                        {estimation.assumptions && estimation.assumptions.length > 0 && (
+                          <ul className="list-disc pl-5 space-y-1 text-xs text-slate-600 leading-relaxed">
+                            {estimation.assumptions.map((assumption, idx) => (
+                              <li key={idx}>{assumption}</li>
+                            ))}
+                          </ul>
+                        )}
+
+                        {estimation.calculationSteps && estimation.calculationSteps.length > 0 && (
+                          <div className="space-y-3">
+                            <h5 className="font-bold text-xs text-slate-800 uppercase tracking-wider">Formula Trail</h5>
+                            <div className="space-y-2">
+                              {estimation.calculationSteps.slice(0, 12).map((step, idx) => (
+                                <div key={`${step.name}-${idx}`} className="p-3 bg-slate-50 rounded border border-slate-200 space-y-1">
+                                  <div className="text-[10px] uppercase font-bold text-slate-400">{step.section}</div>
+                                  <div className="text-xs font-bold text-slate-700">{step.name}</div>
+                                  <div className="font-mono text-[11px] text-slate-700">{step.formula}</div>
+                                  <div className="font-mono text-[11px] text-slate-500">{step.substitutedValues}</div>
+                                  <div className="font-mono text-xs font-black text-[#00796b]">{step.result}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       /* EMPTY STATE */

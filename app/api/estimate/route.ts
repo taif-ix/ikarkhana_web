@@ -16,6 +16,13 @@ function mapEstimateResponse(data: any) {
   const mainItem = data.items?.[0];
   const topPlate = data.items?.find((item: any) => item.name?.toLowerCase().includes('top'));
   const bottomPlate = data.items?.find((item: any) => item.name?.toLowerCase().includes('bottom'));
+  const mapStep = (step: any) => step ? ({
+    section: String(step.section || ''),
+    name: String(step.name || ''),
+    formula: String(step.formula || ''),
+    substitutedValues: String(step.substituted_values || ''),
+    result: String(step.result || ''),
+  }) : undefined;
   return {
     success: true,
     summary: {
@@ -35,7 +42,22 @@ function mapEstimateResponse(data: any) {
       { name: 'Welding', unitCost: Number(data.process_breakdown?.welding_cost || 0), cost: Number(data.process_breakdown?.welding_cost || 0) },
       { name: 'Press machine', unitCost: Number(data.process_breakdown?.press_machine_cost || 0), cost: Number(data.process_breakdown?.press_machine_cost || 0) },
       { name: 'Tacking', unitCost: Number(data.process_breakdown?.tacking_cost || 0), cost: Number(data.process_breakdown?.tacking_cost || 0) },
-    ].filter((item) => item.cost > 0),
+    ],
+    items: (data.items || []).map((item: any) => ({
+      name: String(item.name || ''),
+      quantity: Number(item.quantity || 0),
+      weightKg: Number(item.weight_kg || 0),
+      materialCost: Number(item.material_cost || 0),
+      formulas: item.formulas ? Object.fromEntries(
+        Object.entries(item.formulas).map(([key, value]) => [key, mapStep(value)])
+      ) : {},
+    })),
+    assumptions: data.assumptions || [],
+    calculationSteps: (data.calculation_steps || []).map(mapStep).filter(Boolean),
+    likelyUse: data.likely_use || '',
+    uploadedFile: data.uploaded_file || '',
+    fileSizeKb: Number(data.file_size_kb || 0),
+    surfaceTreatmentCost: Number(data.surface_treatment_cost || 0),
   };
 }
 
@@ -49,6 +71,9 @@ export async function POST(request: Request) {
     formData.append('diagram', new File(['proxy estimate'], 'estimate.txt', { type: 'text/plain' }));
     formData.append('part_name', asString(params.partName, 'Extracted Part'));
     formData.append('material_rate_per_kg', asString(params.materialRate, '255'));
+    formData.append('cutting_rate_per_meter', asString(params.cutRate, '30'));
+    formData.append('welding_labor_per_meter', asString(params.weldRate, '400'));
+    formData.append('surface_rate_per_m2', asString(params.surfaceRate, '120'));
     formData.append('main_material_form', 'rod_profile');
     formData.append('main_profile_shape', isRound ? 'circular' : isRectangular ? 'rectangular' : 'square');
     formData.append('main_profile_is_hollow', String(Boolean(params.isHollow)));
@@ -66,17 +91,19 @@ export async function POST(request: Request) {
     appendIfValue(formData, 'bottom_plate_l_mm', params.bottomPlate?.length);
     appendIfValue(formData, 'bottom_plate_w_mm', params.bottomPlate?.width);
     appendIfValue(formData, 'bottom_plate_t_mm', params.bottomPlate?.thickness);
-    formData.append('handle_od_mm', '19');
-    formData.append('handle_thickness_mm', '2');
-    formData.append('handle_length_mm', '288');
-    formData.append('screw_piece_dia_mm', '20');
-    formData.append('screw_piece_length_mm', '45');
-    formData.append('screw_piece_qty', '4');
-    formData.append('chair_angle_weight_per_m', '2.42');
-    formData.append('chair_angle_length_mm', '150');
-    formData.append('cutting_length_mm', '4049');
-    formData.append('weld_length_mm', '850');
-    formData.append('bend_count', params.processes?.includes('Bending') ? '1' : '0');
+    formData.append('handle_od_mm', asString(params.handleOd, '19'));
+    formData.append('handle_thickness_mm', asString(params.handleThickness, '2'));
+    formData.append('handle_length_mm', asString(params.handleLength, '288'));
+    formData.append('screw_piece_dia_mm', asString(params.screwDia, '20'));
+    formData.append('screw_piece_length_mm', asString(params.screwLength, '45'));
+    formData.append('screw_piece_qty', asString(params.screwQty, '4'));
+    formData.append('chair_angle_weight_per_m', asString(params.angleWeightPerM, '2.42'));
+    formData.append('chair_angle_length_mm', asString(params.angleLength, '150'));
+    formData.append('cutting_length_mm', asString(params.cuttingLength, '4049'));
+    formData.append('weld_length_mm', asString(params.weldLength, '780'));
+    formData.append('bend_count', asString(params.bendCount, params.processes?.includes('Bending') ? '1' : '0'));
+    formData.append('bend_rate_per_stroke', asString(params.bendRate, '5'));
+    formData.append('press_machine_hits', asString(params.pressHits, '0'));
     formData.append('surface_type', params.processes?.includes('Surface') ? 'painted' : 'none');
 
     const response = await fetch(`${API_BASE}/estimate`, {
