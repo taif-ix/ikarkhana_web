@@ -132,6 +132,8 @@ interface EstimationResult {
     totalScrapValue: number;
     approach: string;
   };
+  structuredBreakdown?: StructuredBreakdown;
+  structuredError?: string;
 }
 
 interface CalculationStep {
@@ -140,6 +142,58 @@ interface CalculationStep {
   formula: string;
   substitutedValues: string;
   result: string;
+}
+
+interface StructuredBreakdown {
+  currency: string;
+  part_name?: string | null;
+  per_part_breakdown: Array<{
+    part_number: string;
+    component_name?: string | null;
+    component_type: string;
+    tube_type: string;
+    per_set_qty: number;
+    dimensions?: {
+      length_mm?: number | null;
+      width_or_outer_dia_mm?: number | null;
+      secondary_width_mm?: number | null;
+      thickness_or_wall_thickness_mm?: number | null;
+    };
+    cutting_metrics: {
+      laser_cutting_length_mm: number;
+      press_machine_hits_count: number;
+    };
+    weight_ledger: {
+      unit_gross_rm_weight_kg: number;
+      unit_net_finished_weight_kg: number;
+      unit_scrap_waste_weight_kg: number;
+      total_set_gross_weight_kg: number;
+    };
+    nesting_layout_hint: {
+      nesting_strategy: string;
+      recommended_grain_or_cut_direction: string;
+    };
+    calculated_costs: {
+      material_cost: number;
+      laser_cutting_cost_estimate: number;
+      machine_punching_cost_estimate: number;
+      bending_cost: number;
+      painting_cost: number;
+      total_single_part_cost_via_laser: number;
+      total_single_part_cost_via_machine: number;
+      total_combined_set_cost_via_laser: number;
+      total_combined_set_cost_via_machine: number;
+    };
+    calculation_steps?: CalculationStep[];
+  }>;
+  assembly_level_fabrication: {
+    total_assembly_welding_length_mm: number;
+    welding_labor_cost: number;
+    tacking_fixed_setup_cost: number;
+    grand_total_assembly_cost_via_laser: number;
+    grand_total_assembly_cost_via_machine: number;
+  };
+  assumptions?: string[];
 }
 
 const DEFAULT_IMAGE_URL = 'https://lh3.googleusercontent.com/aida-public/AB6AXuC6yHgi_tmLsGYwxsl0yhWtA48tW7SMCFS_Obqmn9bF65XyFdgRv9FGPF-RmvkN3gONrEnhXZnDFDa05jyhn6iUs4O8Q3NsXysy84_Ov0aknOGe55wSI2xFe8jv54f4L84fLI5fGepe-d1WFiU30oeNpxwyDiXKpQRCOe49H81CLYOaq2yZbz0eJ94sC0oyYycyb8PYuhvoeNFooTfz4gpm9GBMx4Wii6LJN8x3SKTWsvmmkgnry9pCB9pOBdy6u6Ul2tHYcPwZBVw';
@@ -159,6 +213,8 @@ export default function App() {
   const [fileName, setFileName] = useState<string>('');
   const [filePreview, setFilePreview] = useState<string>(DEFAULT_IMAGE_URL);
   const [fileSize, setFileSize] = useState<string>('');
+  const [uploadedImageData, setUploadedImageData] = useState<string>('');
+  const [uploadedImageName, setUploadedImageName] = useState<string>('');
 
   // AI Extraction logging & analysis
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -260,9 +316,22 @@ export default function App() {
     setFileSize((file.size / (1024 * 1024)).toFixed(2) + ' MB');
 
     const reader = new FileReader();
-    reader.onloadend = () => {
+    reader.onloadend = async () => {
       const base64String = reader.result as string;
-      setFilePreview(base64String);
+      setUploadedImageData(base64String);
+      setUploadedImageName(file.name);
+      setFilePreview('');
+      try {
+        const response = await fetch('/api/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: base64String, filename: file.name }),
+        });
+        const result = await response.json();
+        setFilePreview(result.success && result.image ? result.image : base64String);
+      } catch {
+        setFilePreview(base64String);
+      }
       runExtractionPipeline(base64String, file.name);
     };
     reader.readAsDataURL(file);
@@ -273,6 +342,8 @@ export default function App() {
     setFileName('Chassis_Bracket_Drawing_v2.4.dwg');
     setFileSize('4.25 MB');
     setFilePreview(DEFAULT_IMAGE_URL);
+    setUploadedImageData('');
+    setUploadedImageName('');
     runExtractionPipeline(DEFAULT_IMAGE_URL, 'Chassis_Bracket_Drawing_v2.4.dwg');
   };
 
@@ -373,7 +444,32 @@ export default function App() {
       });
       const result = await response.json();
       if (result.success) {
-        setEstimation(result);
+        let structuredBreakdown: StructuredBreakdown | undefined;
+        let structuredError: string | undefined;
+
+        if (uploadedImageData) {
+          try {
+            const structuredResponse = await fetch('/api/structured-estimate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                image: uploadedImageData,
+                filename: uploadedImageName || fileName || 'uploaded-diagram',
+                params,
+              }),
+            });
+            const structuredResult = await structuredResponse.json();
+            if (structuredResult.success) {
+              structuredBreakdown = structuredResult.data;
+            } else {
+              structuredError = structuredResult.error || 'Structured JSON breakdown failed.';
+            }
+          } catch (error: any) {
+            structuredError = error.message || 'Structured JSON breakdown failed.';
+          }
+        }
+
+        setEstimation({ ...result, structuredBreakdown, structuredError });
         triggerToast('Cost estimate successfully calculated!');
         
         // Add to history
@@ -464,6 +560,25 @@ export default function App() {
     };
     const needle = aliases[normalized] || normalized;
     return estimation?.calculationSteps?.find(step => step.name.toLowerCase().includes(needle));
+  };
+
+  const mapStructuredSteps = (steps?: Array<any>): CalculationStep[] =>
+    (steps || []).map(step => ({
+      section: String(step.section || ''),
+      name: String(step.name || ''),
+      formula: String(step.formula || ''),
+      substitutedValues: String(step.substitutedValues || step.substituted_values || ''),
+      result: String(step.result || ''),
+    }));
+
+  const structuredDimensions = (part: StructuredBreakdown['per_part_breakdown'][number]) => {
+    const dims = part.dimensions || {};
+    return [
+      dims.length_mm,
+      dims.width_or_outer_dia_mm,
+      dims.secondary_width_mm,
+      dims.thickness_or_wall_thickness_mm,
+    ].filter(value => value !== undefined && value !== null && Number(value) > 0).join(' x ') || '-';
   };
 
   const valueButtonClass = "font-mono underline decoration-dotted underline-offset-4 hover:text-[#004ccd] focus:text-[#004ccd] cursor-pointer";
@@ -1272,12 +1387,16 @@ export default function App() {
                   </div>
 
                   <div className="flex-1 relative bg-slate-900 group overflow-hidden flex items-center justify-center">
-                    <img 
-                      className="object-contain p-6 mix-blend-screen opacity-90 transition-transform duration-300"
-                      src={filePreview}
-                      style={{ transform: `scale(${zoomLevel / 100})` }}
-                      alt="Technical drawing blueprint" 
-                    />
+                    {filePreview ? (
+                      <img
+                        className="object-contain p-6 opacity-95 transition-transform duration-300 max-w-full max-h-full"
+                        src={filePreview}
+                        style={{ transform: `scale(${zoomLevel / 100})` }}
+                        alt="Technical drawing blueprint"
+                      />
+                    ) : (
+                      <div className="text-slate-400 text-xs font-bold uppercase tracking-wider">Preparing preview...</div>
+                    )}
                     <div className="absolute inset-0 border-2 border-[#004ccd]/10 pointer-events-none"></div>
 
                     {/* Technical details badge */}
@@ -1381,6 +1500,155 @@ export default function App() {
                                 <div className="text-[11px] text-slate-500 font-mono">
                                   {formatInr(estimation.stockSummary.totalScrapValue)} @ Rs {estimation.stockSummary.scrapRatePerKg}/kg
                                 </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {(estimation.structuredBreakdown || estimation.structuredError) && (
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <h5 className="font-bold text-xs text-slate-800 uppercase tracking-wider">Structured JSON Breakdown</h5>
+                              {estimation.structuredBreakdown && (
+                                <span className="text-[10px] px-2 py-1 rounded bg-emerald-50 text-emerald-700 font-bold uppercase">
+                                  {estimation.structuredBreakdown.currency || 'INR'}
+                                </span>
+                              )}
+                            </div>
+
+                            {estimation.structuredError && (
+                              <div className="p-3 bg-amber-50 border border-amber-200 rounded text-xs text-amber-800 leading-relaxed">
+                                {estimation.structuredError}
+                              </div>
+                            )}
+
+                            {estimation.structuredBreakdown && (
+                              <div className="space-y-3">
+                                <div className="grid grid-cols-2 gap-4">
+                                  <div className="p-3 bg-blue-50/60 rounded border border-blue-100 space-y-1">
+                                    <span className="text-[10px] uppercase font-bold text-[#004ccd]">Grand Total via Laser</span>
+                                    <button
+                                      type="button"
+                                      className="text-lg font-black text-[#004ccd] font-mono text-left hover:text-blue-800"
+                                      onClick={() => openBreakdown('Structured Laser Total', estimation.structuredBreakdown?.per_part_breakdown.flatMap(part => mapStructuredSteps(part.calculation_steps)) || [])}
+                                    >
+                                      {formatInr(estimation.structuredBreakdown.assembly_level_fabrication.grand_total_assembly_cost_via_laser)}
+                                    </button>
+                                  </div>
+                                  <div className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1">
+                                    <span className="text-[10px] uppercase font-bold text-slate-400">Grand Total via Machine</span>
+                                    <button
+                                      type="button"
+                                      className="text-lg font-black text-slate-900 font-mono text-left hover:text-[#004ccd]"
+                                      onClick={() => openBreakdown('Structured Machine Total', estimation.structuredBreakdown?.per_part_breakdown.flatMap(part => mapStructuredSteps(part.calculation_steps)) || [])}
+                                    >
+                                      {formatInr(estimation.structuredBreakdown.assembly_level_fabrication.grand_total_assembly_cost_via_machine)}
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="border border-slate-200 rounded overflow-hidden">
+                                  <table className="w-full text-left text-xs border-collapse">
+                                    <thead>
+                                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-400 uppercase font-mono text-[9px]">
+                                        <th className="p-2.5 font-bold">Part</th>
+                                        <th className="p-2.5 font-bold">Type</th>
+                                        <th className="p-2.5 font-bold text-right">Qty</th>
+                                        <th className="p-2.5 font-bold text-right">Dims</th>
+                                        <th className="p-2.5 font-bold text-right">Net Wt</th>
+                                        <th className="p-2.5 font-bold text-right">Scrap</th>
+                                        <th className="p-2.5 font-bold text-right">Laser</th>
+                                        <th className="p-2.5 font-bold text-right">Machine</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100 font-mono text-slate-700">
+                                      {estimation.structuredBreakdown.per_part_breakdown.map((part, idx) => (
+                                        <tr key={`${part.part_number}-${idx}`}>
+                                          <td className="p-2.5 font-sans font-bold text-slate-900">
+                                            {part.part_number}
+                                            {part.component_name && <div className="text-[10px] font-medium text-slate-500">{part.component_name}</div>}
+                                          </td>
+                                          <td className="p-2.5">
+                                            <div>{part.component_type}</div>
+                                            <div className="text-[10px] text-slate-400">{part.tube_type}</div>
+                                          </td>
+                                          <td className="p-2.5 text-right">{part.per_set_qty}</td>
+                                          <td className="p-2.5 text-right">{structuredDimensions(part)}</td>
+                                          <td className="p-2.5 text-right">
+                                            <button
+                                              type="button"
+                                              className={valueButtonClass}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Weight`, mapStructuredSteps(part.calculation_steps))}
+                                            >
+                                              {part.weight_ledger.unit_net_finished_weight_kg.toFixed(3)} kg
+                                            </button>
+                                          </td>
+                                          <td className="p-2.5 text-right">
+                                            <button
+                                              type="button"
+                                              className={valueButtonClass}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Scrap`, mapStructuredSteps(part.calculation_steps))}
+                                            >
+                                              {part.weight_ledger.unit_scrap_waste_weight_kg.toFixed(3)} kg
+                                            </button>
+                                          </td>
+                                          <td className="p-2.5 text-right">
+                                            <button
+                                              type="button"
+                                              className={valueButtonClass}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Laser Cost`, mapStructuredSteps(part.calculation_steps))}
+                                            >
+                                              {formatInr(part.calculated_costs.total_combined_set_cost_via_laser)}
+                                            </button>
+                                          </td>
+                                          <td className="p-2.5 text-right">
+                                            <button
+                                              type="button"
+                                              className={valueButtonClass}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Machine Cost`, mapStructuredSteps(part.calculation_steps))}
+                                            >
+                                              {formatInr(part.calculated_costs.total_combined_set_cost_via_machine)}
+                                            </button>
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                  <div className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1">
+                                    <span className="text-[10px] uppercase font-bold text-slate-400">Welding</span>
+                                    <div className="text-xs text-slate-600 font-mono">
+                                      {estimation.structuredBreakdown.assembly_level_fabrication.total_assembly_welding_length_mm} mm = {formatInr(estimation.structuredBreakdown.assembly_level_fabrication.welding_labor_cost)}
+                                    </div>
+                                  </div>
+                                  <div className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1">
+                                    <span className="text-[10px] uppercase font-bold text-slate-400">Tacking Setup</span>
+                                    <div className="text-xs text-slate-600 font-mono">
+                                      {formatInr(estimation.structuredBreakdown.assembly_level_fabrication.tacking_fixed_setup_cost)}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="space-y-2">
+                                  {estimation.structuredBreakdown.per_part_breakdown.slice(0, 4).map((part, idx) => (
+                                    <div key={`${part.part_number}-nesting-${idx}`} className="p-3 bg-slate-50 rounded border border-slate-200">
+                                      <div className="text-xs font-bold text-slate-800">Part {part.part_number} nesting</div>
+                                      <div className="text-[11px] leading-relaxed text-slate-600">{part.nesting_layout_hint.nesting_strategy}</div>
+                                      <div className="text-[10px] text-slate-400 mt-1">{part.nesting_layout_hint.recommended_grain_or_cut_direction}</div>
+                                    </div>
+                                  ))}
+                                </div>
+
+                                <details className="border border-slate-200 rounded bg-slate-950 text-slate-100 overflow-hidden">
+                                  <summary className="cursor-pointer px-3 py-2 text-[10px] uppercase font-bold tracking-wider text-slate-300 bg-slate-900">
+                                    View raw JSON
+                                  </summary>
+                                  <pre className="max-h-80 overflow-auto p-3 text-[10px] leading-relaxed font-mono whitespace-pre-wrap">
+                                    {JSON.stringify(estimation.structuredBreakdown, null, 2)}
+                                  </pre>
+                                </details>
                               </div>
                             )}
                           </div>
