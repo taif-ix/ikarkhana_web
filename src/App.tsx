@@ -167,6 +167,7 @@ export default function App() {
 
   // zoom preview
   const [zoomLevel, setZoomLevel] = useState<number>(100);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
 
   // Form parameters
   const [params, setParams] = useState<TechnicalParams>({
@@ -1163,16 +1164,34 @@ export default function App() {
                 </div>
               </section>
 
-              {/* Right Column: Diagram Preview & Estimation Results */}
-              <section className="col-span-12 xl:col-span-5 bg-slate-100 flex flex-col h-full overflow-hidden p-6 gap-6">
-                {/* 1. Diagram Preview Panel */}
-                <div className="bg-white border border-[#c3c6d8] rounded-xl flex flex-col overflow-hidden shadow-sm h-1/2 relative">
+              {/* Right Column: Estimation Results */}
+              <section className="col-span-12 xl:col-span-5 bg-slate-100 flex flex-col h-full overflow-hidden p-6 gap-6 relative">
+                <button
+                  type="button"
+                  className="absolute top-6 right-6 z-10 px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-2 shadow"
+                  onClick={() => setIsPreviewOpen(true)}
+                  title="Open diagram preview"
+                >
+                  <FileText className="w-4 h-4" />
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+
+                {/* Diagram Preview Drawer */}
+                {isPreviewOpen && (
+                <div className="absolute inset-6 z-30 bg-white border border-[#c3c6d8] rounded-xl flex flex-col overflow-hidden shadow-2xl">
                   <div className="px-4 py-3 border-b border-[#c3c6d8] bg-slate-50 flex justify-between items-center flex-shrink-0">
                     <span className="font-bold text-xs uppercase tracking-wider flex items-center gap-2 text-slate-900">
                       <FileText className="w-4 h-4 text-[#004ccd]" />
                       Diagram Preview
                     </span>
                     <div className="flex gap-2">
+                      <button
+                        className="p-1.5 hover:bg-slate-200 text-slate-600 hover:text-slate-900 rounded transition-all"
+                        onClick={() => setIsPreviewOpen(false)}
+                        title="Back to estimate"
+                      >
+                        <ArrowRight className="w-4 h-4 rotate-180" />
+                      </button>
                       <button 
                         className="p-1 hover:bg-slate-200 text-slate-500 hover:text-slate-900 rounded transition-all"
                         onClick={() => setZoomLevel(prev => Math.min(prev + 15, 175))}
@@ -1212,8 +1231,9 @@ export default function App() {
                     )}
                   </div>
                 </div>
+                )}
 
-                {/* 2. Actions / Ready to Estimate Panel */}
+                {/* 1. Actions / Ready to Estimate Panel */}
                 <div className="bg-white border border-[#c3c6d8] p-4 rounded-xl flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm flex-shrink-0">
                   <div className="flex items-center gap-4 w-full md:w-auto">
                     <div className="w-11 h-11 rounded-full bg-emerald-50 text-emerald-500 flex items-center justify-center border border-emerald-100 flex-shrink-0">
@@ -1238,8 +1258,8 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* 3. Cost Estimation Results View */}
-                <div className="flex-1 bg-white border border-[#c3c6d8] rounded-xl flex flex-col overflow-hidden shadow-sm h-1/2">
+                {/* 2. Cost Estimation Results View */}
+                <div className="flex-1 min-h-0 bg-white border border-[#c3c6d8] rounded-xl flex flex-col overflow-hidden shadow-sm">
                   <div className="px-4 py-3 border-b border-[#c3c6d8] bg-slate-50 flex items-center gap-2 flex-shrink-0">
                     <Coins className="w-4 h-4 text-[#004ccd]" />
                     <span className="font-bold text-xs uppercase tracking-wider text-slate-900">Estimation breakdown</span>
