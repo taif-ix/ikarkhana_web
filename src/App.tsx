@@ -80,6 +80,9 @@ interface EstimationResult {
 const DEFAULT_IMAGE_URL = 'https://lh3.googleusercontent.com/aida-public/AB6AXuC6yHgi_tmLsGYwxsl0yhWtA48tW7SMCFS_Obqmn9bF65XyFdgRv9FGPF-RmvkN3gONrEnhXZnDFDa05jyhn6iUs4O8Q3NsXysy84_Ov0aknOGe55wSI2xFe8jv54f4L84fLI5fGepe-d1WFiU30oeNpxwyDiXKpQRCOe49H81CLYOaq2yZbz0eJ94sC0oyYycyb8PYuhvoeNFooTfz4gpm9GBMx4Wii6LJN8x3SKTWsvmmkgnry9pCB9pOBdy6u6Ul2tHYcPwZBVw';
 const DEFAULT_AVATAR_URL = 'https://lh3.googleusercontent.com/aida-public/AB6AXuBvoo20EKFrEePwRASgVWvtuN3C1QE24OsZ-K0kmyFnGyr34stmkaZ6LEaSU8QtJz06ktSKf2dJu5bvvrerfkgY2qHqY5pNEjfHZTIzpP2HuoPqUNv18Y4oS_pCJd5JXunIwAa6VqumI44wek2RpyAKN8_Qc6ngUHCktWSZx1o-VX1HflaUS_NSgNjYtwU6UsFFPwyX4cPqdPjBqp8aqt3O1yrvYexRyKZEVyxTEpBrYrrDtrzzOxGrDDJ5IqmBXBH8ymsZS2IZa7s';
 
+const formatInr = (value: number) =>
+  `Rs ${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 export default function App() {
   // Navigation: 'landing' or 'workspace'
   const [currentScreen, setCurrentScreen] = useState<'landing' | 'workspace'>('landing');
@@ -103,7 +106,7 @@ export default function App() {
   // Form parameters
   const [params, setParams] = useState<TechnicalParams>({
     partName: '',
-    materialRate: '14.50',
+    materialRate: '255',
     materialForm: 'Select...',
     shape: '',
     isHollow: false,
@@ -230,7 +233,7 @@ export default function App() {
       // fallback in case of strict network failure
       setParams({
         partName: 'Chassis_Bracket_A102',
-        materialRate: '14.50',
+        materialRate: '255',
         materialForm: 'Round Rod',
         shape: 'Symmetric Collar',
         isHollow: true,
@@ -347,7 +350,7 @@ export default function App() {
             onClick={() => { setCurrentScreen('landing'); setActiveTab('projects'); }}
           >
             <Scale className="w-6 h-6 text-[#004ccd]" />
-            EngineerEstimate Pro
+            ikarkhana
           </span>
           <nav className="hidden md:flex items-center gap-6">
             <button 
@@ -651,7 +654,7 @@ export default function App() {
                         <td className="p-4 font-sans text-slate-900 font-medium">{item.partName}</td>
                         <td className="p-4 text-slate-500">{item.date}</td>
                         <td className="p-4 text-right text-slate-700">{item.weight.toFixed(3)} kg</td>
-                        <td className="p-4 text-right font-bold text-slate-900">${item.cost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td className="p-4 text-right font-bold text-slate-900">{formatInr(item.cost)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -738,12 +741,12 @@ export default function App() {
                         />
                       </div>
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Material Rate ($/kg)</label>
+                        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Material Rate (INR/kg)</label>
                         <input 
                           type="number"
                           step="0.01"
                           className="w-full bg-slate-50 hover:bg-slate-100/70 focus:bg-white border border-[#c3c6d8] px-3 py-2 text-xs font-medium rounded outline-none focus:border-[#004ccd] transition-all font-mono"
-                          placeholder="Rate in USD"
+                          placeholder="Rate in INR"
                           value={params.materialRate}
                           onChange={(e) => handleParamChange('materialRate', e.target.value)}
                         />
@@ -1065,7 +1068,7 @@ export default function App() {
                           <div className="p-3 bg-blue-50/50 rounded border border-blue-100/50 space-y-1">
                             <span className="text-[10px] uppercase font-bold text-[#004ccd]">Total Project Cost</span>
                             <div className="text-xl font-black text-[#004ccd] font-mono">
-                              ${estimation.summary.totalCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {formatInr(estimation.summary.totalCost)}
                             </div>
                           </div>
                         </div>
@@ -1129,14 +1132,14 @@ export default function App() {
                                   {estimation.processDetails.map((pd, idx) => (
                                     <tr key={idx}>
                                       <td className="p-2.5 font-sans font-medium text-slate-900">{pd.name}</td>
-                                      <td className="p-2.5 text-right">${pd.unitCost.toFixed(2)}</td>
-                                      <td className="p-2.5 text-right font-bold text-slate-900">${pd.cost.toFixed(2)}</td>
+                                      <td className="p-2.5 text-right">{formatInr(pd.unitCost)}</td>
+                                      <td className="p-2.5 text-right font-bold text-slate-900">{formatInr(pd.cost)}</td>
                                     </tr>
                                   ))}
                                   <tr className="bg-slate-50 font-bold text-slate-900 border-t border-slate-200">
                                     <td className="p-2.5 font-sans">Operational Process Total</td>
                                     <td className="p-2.5 text-right">-</td>
-                                    <td className="p-2.5 text-right">${estimation.summary.processCost.toFixed(2)}</td>
+                                    <td className="p-2.5 text-right">{formatInr(estimation.summary.processCost)}</td>
                                   </tr>
                                 </tbody>
                               </table>
@@ -1147,16 +1150,16 @@ export default function App() {
                         {/* Overall dynamic totals footer */}
                         <div className="pt-3 border-t border-slate-200 space-y-1 text-slate-600 font-medium">
                           <div className="flex justify-between">
-                            <span>Base Material Cost ({estimation.summary.totalWeightKg.toFixed(3)} kg @ ${params.materialRate}/kg):</span>
-                            <span className="font-mono text-slate-900">${estimation.summary.materialCost.toFixed(2)}</span>
+                            <span>Base Material Cost ({estimation.summary.totalWeightKg.toFixed(3)} kg @ Rs {params.materialRate}/kg):</span>
+                            <span className="font-mono text-slate-900">{formatInr(estimation.summary.materialCost)}</span>
                           </div>
                           <div className="flex justify-between">
                             <span>Process & Routing Surcharges:</span>
-                            <span className="font-mono text-slate-900">${estimation.summary.processCost.toFixed(2)}</span>
+                            <span className="font-mono text-slate-900">{formatInr(estimation.summary.processCost)}</span>
                           </div>
                           <div className="flex justify-between font-bold text-slate-900 text-sm pt-2 border-t border-dashed border-slate-200">
                             <span>Calculated Grand Estimate:</span>
-                            <span className="font-mono text-[#004ccd]">${estimation.summary.totalCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                            <span className="font-mono text-[#004ccd]">{formatInr(estimation.summary.totalCost)}</span>
                           </div>
                         </div>
                       </div>
@@ -1196,7 +1199,7 @@ export default function App() {
 
       {/* Corporate Technical Footer */}
       <footer className="h-14 border-t border-[#c3c6d8] bg-white flex justify-between items-center px-6 text-[11px] font-medium text-[#424656] shrink-0">
-        <div>© 2026 EngineerEstimate Pro. All technical rights reserved.</div>
+        <div>© 2026 ikarkhana. All technical rights reserved.</div>
         <div className="flex gap-6 font-semibold">
           <a href="#" className="hover:text-[#004ccd] transition-colors" onClick={() => triggerToast('Direct support and compliance notes.')}>Privacy Policy</a>
           <a href="#" className="hover:text-[#004ccd] transition-colors" onClick={() => triggerToast('ASME and structural engineering manual documentation.')}>Technical Docs</a>

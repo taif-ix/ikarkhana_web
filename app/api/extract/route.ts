@@ -70,7 +70,12 @@ export async function POST(request: Request) {
     });
     const payload = await response.json();
     if (!response.ok) {
-      return NextResponse.json({ success: false, error: payload.detail || `Backend returned ${response.status}` }, { status: response.status });
+      return NextResponse.json({
+        success: true,
+        source: 'simulation_fallback',
+        warning: payload.detail || `Backend returned ${response.status}`,
+        data: fallbackData(),
+      });
     }
 
     return NextResponse.json({

@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import '../src/index.css';
 
 export const metadata: Metadata = {
-  title: 'EngineerEstimate Pro',
+  title: 'ikarkhana',
   description: 'Engineering diagram cost estimation frontend',
 };
 
