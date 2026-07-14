@@ -5,7 +5,10 @@ const API_BASE = process.env.COST_ESTIMATOR_API_BASE || 'http://127.0.0.1:8010';
 function fallbackData() {
   return {
     partName: 'PILLAR ASSEMBLY',
-    materialRate: '255',
+    rawMaterialType: 'ss',
+    rawMaterialCode: 'C-K201',
+    componentMaterials: [],
+    materialRate: '240',
     materialForm: 'Square Bar',
     shape: 'Square hollow tube',
     isHollow: true,
@@ -24,6 +27,7 @@ function fallbackData() {
     screwLength: '45',
     screwQty: '4',
     cuttingLength: '4049',
+    cuttingSurfaceCount: '4',
     cutRate: '30',
     weldLength: '780',
     weldRate: '400',
@@ -48,7 +52,10 @@ function mapExtractedDimensions(data: any) {
   const isCircular = shape === 'circular';
   return {
     partName: data.part_name || 'Extracted Part',
-    materialRate: '255',
+    rawMaterialType: data.raw_material_type || 'ss',
+    rawMaterialCode: data.raw_material_code || '',
+    componentMaterials: Array.isArray(data.component_materials) ? data.component_materials : [],
+    materialRate: data.raw_material_type === 'ms' ? '60' : data.raw_material_type === 'aluminium' ? '200' : data.raw_material_type === 'copper' ? '900' : '240',
     materialForm: isCircular ? 'Round Rod' : 'Square Bar',
     shape,
     isHollow: data.main_profile_is_hollow ?? true,
@@ -75,6 +82,7 @@ function mapExtractedDimensions(data: any) {
     screwLength: String(data.screw_piece_length_mm || ''),
     screwQty: String(data.screw_piece_qty || ''),
     cuttingLength: String(data.cutting_length_mm || ''),
+    cuttingSurfaceCount: String(data.cutting_surface_count || ''),
     cutRate: '30',
     weldLength: String(data.weld_length_mm || ''),
     weldRate: '400',

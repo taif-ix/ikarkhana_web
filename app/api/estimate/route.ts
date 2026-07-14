@@ -41,6 +41,7 @@ function mapEstimateResponse(data: any) {
       { name: 'Bending', unitCost: Number(data.process_breakdown?.bending_cost || 0), cost: Number(data.process_breakdown?.bending_cost || 0) },
       { name: 'Welding', unitCost: Number(data.process_breakdown?.welding_cost || 0), cost: Number(data.process_breakdown?.welding_cost || 0) },
       { name: 'Press machine', unitCost: Number(data.process_breakdown?.press_machine_cost || 0), cost: Number(data.process_breakdown?.press_machine_cost || 0) },
+      { name: 'Painting', unitCost: Number(data.process_breakdown?.painting_cost || 0), cost: Number(data.process_breakdown?.painting_cost || 0) },
       { name: 'Tacking', unitCost: Number(data.process_breakdown?.tacking_cost || 0), cost: Number(data.process_breakdown?.tacking_cost || 0) },
     ],
     items: (data.items || []).map((item: any) => ({
@@ -48,6 +49,14 @@ function mapEstimateResponse(data: any) {
       quantity: Number(item.quantity || 0),
       weightKg: Number(item.weight_kg || 0),
       materialCost: Number(item.material_cost || 0),
+      materialLabel: String(item.material_label || ''),
+      stockForm: item.stock_form || '',
+      stockSize: item.stock_size || '',
+      partsPerStock: item.parts_per_stock,
+      scrapWeightKg: Number(item.scrap_weight_kg || 0),
+      scrapValue: Number(item.scrap_value || 0),
+      netStockCostPerPart: Number(item.net_stock_cost_per_part || 0),
+      nestingApproach: item.nesting_approach || '',
       formulas: item.formulas ? Object.fromEntries(
         Object.entries(item.formulas).map(([key, value]) => [key, mapStep(value)])
       ) : {},
@@ -58,6 +67,22 @@ function mapEstimateResponse(data: any) {
     uploadedFile: data.uploaded_file || '',
     fileSizeKb: Number(data.file_size_kb || 0),
     surfaceTreatmentCost: Number(data.surface_treatment_cost || 0),
+    materialSummary: data.material_summary ? {
+      materialType: String(data.material_summary.material_type || ''),
+      materialLabel: String(data.material_summary.material_label || ''),
+      materialCode: data.material_summary.material_code || '',
+      densityKgPerMm3: Number(data.material_summary.density_kg_per_mm3 || 0),
+      ratePerKg: Number(data.material_summary.rate_per_kg || 0),
+    } : undefined,
+    stockSummary: data.stock_summary ? {
+      rodStockLengthMm: Number(data.stock_summary.rod_stock_length_mm || 0),
+      sheetStockLengthMm: Number(data.stock_summary.sheet_stock_length_mm || 0),
+      sheetStockWidthMm: Number(data.stock_summary.sheet_stock_width_mm || 0),
+      scrapRatePerKg: Number(data.stock_summary.scrap_rate_per_kg || 0),
+      totalScrapWeightKg: Number(data.stock_summary.total_scrap_weight_kg || 0),
+      totalScrapValue: Number(data.stock_summary.total_scrap_value || 0),
+      approach: String(data.stock_summary.approach || ''),
+    } : undefined,
   };
 }
 
@@ -70,7 +95,10 @@ export async function POST(request: Request) {
     const formData = new FormData();
     formData.append('diagram', new File(['proxy estimate'], 'estimate.txt', { type: 'text/plain' }));
     formData.append('part_name', asString(params.partName, 'Extracted Part'));
-    formData.append('material_rate_per_kg', asString(params.materialRate, '255'));
+    formData.append('raw_material_type', asString(params.rawMaterialType, 'ss'));
+    formData.append('raw_material_code', asString(params.rawMaterialCode, ''));
+    formData.append('component_materials_json', JSON.stringify(params.componentMaterials || []));
+    formData.append('material_rate_per_kg', asString(params.materialRate, '240'));
     formData.append('cutting_rate_per_meter', asString(params.cutRate, '30'));
     formData.append('welding_labor_per_meter', asString(params.weldRate, '400'));
     formData.append('surface_rate_per_m2', asString(params.surfaceRate, '120'));
@@ -100,6 +128,7 @@ export async function POST(request: Request) {
     formData.append('chair_angle_weight_per_m', asString(params.angleWeightPerM, '2.42'));
     formData.append('chair_angle_length_mm', asString(params.angleLength, '150'));
     formData.append('cutting_length_mm', asString(params.cuttingLength, '4049'));
+    formData.append('cutting_surface_count', asString(params.cuttingSurfaceCount, '0'));
     formData.append('weld_length_mm', asString(params.weldLength, '780'));
     formData.append('bend_count', asString(params.bendCount, params.processes?.includes('Bending') ? '1' : '0'));
     formData.append('bend_rate_per_stroke', asString(params.bendRate, '5'));

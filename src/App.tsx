@@ -41,6 +41,9 @@ interface PlateParams {
 
 interface TechnicalParams {
   partName: string;
+  rawMaterialType: string;
+  rawMaterialCode: string;
+  componentMaterials: Array<Record<string, string | number | null>>;
   materialRate: string;
   materialForm: 'Round Rod' | 'Square Bar' | 'Select...';
   shape: string;
@@ -60,6 +63,7 @@ interface TechnicalParams {
   screwLength: string;
   screwQty: string;
   cuttingLength: string;
+  cuttingSurfaceCount: string;
   cutRate: string;
   weldLength: string;
   weldRate: string;
@@ -96,6 +100,14 @@ interface EstimationResult {
     quantity: number;
     weightKg: number;
     materialCost: number;
+    materialLabel?: string;
+    stockForm?: string;
+    stockSize?: string;
+    partsPerStock?: number;
+    scrapWeightKg?: number;
+    scrapValue?: number;
+    netStockCostPerPart?: number;
+    nestingApproach?: string;
     formulas?: Record<string, CalculationStep>;
   }>;
   assumptions?: string[];
@@ -104,6 +116,22 @@ interface EstimationResult {
   uploadedFile?: string;
   fileSizeKb?: number;
   surfaceTreatmentCost?: number;
+  materialSummary?: {
+    materialType: string;
+    materialLabel: string;
+    materialCode?: string;
+    densityKgPerMm3: number;
+    ratePerKg: number;
+  };
+  stockSummary?: {
+    rodStockLengthMm: number;
+    sheetStockLengthMm: number;
+    sheetStockWidthMm: number;
+    scrapRatePerKg: number;
+    totalScrapWeightKg: number;
+    totalScrapValue: number;
+    approach: string;
+  };
 }
 
 interface CalculationStep {
@@ -143,7 +171,10 @@ export default function App() {
   // Form parameters
   const [params, setParams] = useState<TechnicalParams>({
     partName: '',
-    materialRate: '255',
+    rawMaterialType: 'ss',
+    rawMaterialCode: '',
+    componentMaterials: [],
+    materialRate: '240',
     materialForm: 'Select...',
     shape: '',
     isHollow: false,
@@ -162,6 +193,7 @@ export default function App() {
     screwLength: '',
     screwQty: '',
     cuttingLength: '',
+    cuttingSurfaceCount: '',
     cutRate: '30',
     weldLength: '',
     weldRate: '400',
@@ -286,7 +318,10 @@ export default function App() {
       // fallback in case of strict network failure
       setParams({
         partName: 'Chassis_Bracket_A102',
-        materialRate: '255',
+        rawMaterialType: 'ss',
+        rawMaterialCode: 'C-K201',
+        componentMaterials: [],
+        materialRate: '240',
         materialForm: 'Round Rod',
         shape: 'Symmetric Collar',
         isHollow: true,
@@ -305,6 +340,7 @@ export default function App() {
         screwLength: '45',
         screwQty: '4',
         cuttingLength: '4049',
+        cuttingSurfaceCount: '4',
         cutRate: '30',
         weldLength: '780',
         weldRate: '400',
@@ -810,6 +846,33 @@ export default function App() {
                         />
                       </div>
                       <div className="space-y-1">
+                        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Raw Material</label>
+                        <select
+                          className="w-full bg-slate-50 hover:bg-slate-100/70 focus:bg-white border border-[#c3c6d8] px-3 py-2 text-xs font-medium rounded outline-none focus:border-[#004ccd] transition-all"
+                          value={params.rawMaterialType}
+                          onChange={(e) => {
+                            const nextType = e.target.value;
+                            const defaultRates: Record<string, string> = { ms: '60', ss: '240', aluminium: '200', copper: '900' };
+                            setParams(prev => ({ ...prev, rawMaterialType: nextType, materialRate: defaultRates[nextType] || prev.materialRate }));
+                          }}
+                        >
+                          <option value="ms">Mild Steel</option>
+                          <option value="ss">Stainless Steel</option>
+                          <option value="aluminium">Aluminium</option>
+                          <option value="copper">Copper</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Material Code</label>
+                        <input
+                          type="text"
+                          className="w-full bg-slate-50 hover:bg-slate-100/70 focus:bg-white border border-[#c3c6d8] px-3 py-2 text-xs font-medium rounded outline-none focus:border-[#004ccd] transition-all"
+                          placeholder="e.g. C-K201, IS2062, 6061"
+                          value={params.rawMaterialCode}
+                          onChange={(e) => handleParamChange('rawMaterialCode', e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
                         <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Material Rate (INR/kg)</label>
                         <input 
                           type="number"
@@ -1047,6 +1110,7 @@ export default function App() {
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono text-xs">
                       {[
                         ['Total cut length mm', 'cuttingLength'],
+                        ['Cut surfaces', 'cuttingSurfaceCount'],
                         ['Cut rate INR/m', 'cutRate'],
                         ['Weld length mm', 'weldLength'],
                         ['Weld labor INR/m', 'weldRate'],
@@ -1207,6 +1271,29 @@ export default function App() {
                           </div>
                         )}
 
+                        {(estimation.materialSummary || estimation.stockSummary) && (
+                          <div className="grid grid-cols-2 gap-4">
+                            {estimation.materialSummary && (
+                              <div className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1">
+                                <span className="text-[10px] uppercase font-bold text-slate-400">Material</span>
+                                <div className="text-sm font-black text-slate-900">{estimation.materialSummary.materialLabel}</div>
+                                <div className="text-[11px] text-slate-500 font-mono">
+                                  {estimation.materialSummary.materialCode || params.rawMaterialCode || 'No code'} @ {formatInr(estimation.materialSummary.ratePerKg)}/kg
+                                </div>
+                              </div>
+                            )}
+                            {estimation.stockSummary && (
+                              <div className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1">
+                                <span className="text-[10px] uppercase font-bold text-slate-400">Scrap / Offcut</span>
+                                <div className="text-sm font-black text-slate-900">{estimation.stockSummary.totalScrapWeightKg.toFixed(3)} kg</div>
+                                <div className="text-[11px] text-slate-500 font-mono">
+                                  {formatInr(estimation.stockSummary.totalScrapValue)} @ Rs {estimation.stockSummary.scrapRatePerKg}/kg
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         {/* Calculations Breakdowns table */}
                         <div className="space-y-3">
                           <h5 className="font-bold text-xs text-slate-800 uppercase tracking-wider">Itemized Mass Distribution</h5>
@@ -1260,6 +1347,8 @@ export default function App() {
                                     <th className="p-2.5 font-bold text-right">Qty</th>
                                     <th className="p-2.5 font-bold text-right">Weight</th>
                                     <th className="p-2.5 font-bold text-right">Material</th>
+                                    <th className="p-2.5 font-bold text-right">Stock Yield</th>
+                                    <th className="p-2.5 font-bold text-right">Scrap</th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100 font-mono text-slate-700">
@@ -1269,10 +1358,29 @@ export default function App() {
                                       <td className="p-2.5 text-right">{item.quantity}</td>
                                       <td className="p-2.5 text-right underline decoration-dotted underline-offset-4">{item.weightKg.toFixed(3)} kg</td>
                                       <td className="p-2.5 text-right underline decoration-dotted underline-offset-4">{formatInr(item.materialCost)}</td>
+                                      <td className="p-2.5 text-right">{item.partsPerStock ? `${item.partsPerStock}/${item.stockForm}` : '-'}</td>
+                                      <td className="p-2.5 text-right">{item.scrapWeightKg ? `${item.scrapWeightKg.toFixed(3)} kg (${formatInr(item.scrapValue || 0)})` : '-'}</td>
                                     </tr>
                                   ))}
                                 </tbody>
                               </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {estimation.items?.some(item => item.nestingApproach) && (
+                          <div className="space-y-3">
+                            <h5 className="font-bold text-xs text-slate-800 uppercase tracking-wider">Nesting / Stock Approach</h5>
+                            <div className="space-y-2">
+                              {estimation.items.filter(item => item.nestingApproach).map((item, idx) => (
+                                <div key={`${item.name}-nest-${idx}`} className="p-3 bg-slate-50 rounded border border-slate-200">
+                                  <div className="text-xs font-bold text-slate-800">{item.name}</div>
+                                  <div className="text-[11px] leading-relaxed text-slate-600">{item.nestingApproach}</div>
+                                </div>
+                              ))}
+                              {estimation.stockSummary && (
+                                <div className="text-[11px] leading-relaxed text-slate-500">{estimation.stockSummary.approach}</div>
+                              )}
                             </div>
                           </div>
                         )}
