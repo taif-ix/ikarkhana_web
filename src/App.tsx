@@ -168,6 +168,7 @@ export default function App() {
   // zoom preview
   const [zoomLevel, setZoomLevel] = useState<number>(100);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [selectedBreakdown, setSelectedBreakdown] = useState<{ title: string; steps: CalculationStep[] } | null>(null);
 
   // Form parameters
   const [params, setParams] = useState<TechnicalParams>({
@@ -438,6 +439,35 @@ export default function App() {
     triggerToast('Technical costing report copied to clipboard as JSON!');
   };
 
+  const openBreakdown = (title: string, steps: Array<CalculationStep | undefined>) => {
+    const validSteps = steps.filter(Boolean) as CalculationStep[];
+    if (validSteps.length === 0) {
+      triggerToast('No formula trail is available for this value yet.');
+      return;
+    }
+    setSelectedBreakdown({ title, steps: validSteps });
+  };
+
+  const findCalculationStep = (name: string) =>
+    estimation?.calculationSteps?.find(step => step.name.toLowerCase() === name.toLowerCase());
+
+  const findProcessStep = (name: string) => {
+    const normalized = name.toLowerCase();
+    const aliases: Record<string, string> = {
+      painting: 'surface treatment',
+      surface: 'surface treatment',
+      'press machine': 'press machine',
+      cutting: 'cutting',
+      bending: 'bending',
+      welding: 'welding',
+      tacking: 'tacking',
+    };
+    const needle = aliases[normalized] || normalized;
+    return estimation?.calculationSteps?.find(step => step.name.toLowerCase().includes(needle));
+  };
+
+  const valueButtonClass = "font-mono underline decoration-dotted underline-offset-4 hover:text-[#004ccd] focus:text-[#004ccd] cursor-pointer";
+
   return (
     <div className="flex flex-col min-h-screen bg-[#f9f9f9] text-[#1a1c1c] font-sans antialiased">
       {/* Toast Notification */}
@@ -445,6 +475,40 @@ export default function App() {
         <div className="fixed top-20 right-6 z-[100] flex items-center gap-3 px-5 py-4 bg-slate-900 text-white rounded-lg shadow-xl border border-slate-700 animate-slide-in">
           <Info className="w-5 h-5 text-sky-400" />
           <span className="text-sm font-semibold">{toastMessage}</span>
+        </div>
+      )}
+
+      {selectedBreakdown && (
+        <div className="fixed inset-0 z-[120] bg-slate-950/45 flex items-center justify-center p-4" onClick={() => setSelectedBreakdown(null)}>
+          <div
+            className="w-full max-w-2xl max-h-[82vh] bg-white border border-[#c3c6d8] rounded-xl shadow-2xl overflow-hidden flex flex-col"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-5 py-4 bg-slate-50 border-b border-[#c3c6d8] flex items-center justify-between gap-4">
+              <div>
+                <div className="text-[10px] uppercase tracking-widest font-bold text-[#004ccd]">Calculation Breakdown</div>
+                <h3 className="text-base font-black text-slate-900">{selectedBreakdown.title}</h3>
+              </div>
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded bg-slate-900 text-white text-xs font-bold hover:bg-slate-800"
+                onClick={() => setSelectedBreakdown(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto custom-scrollbar space-y-3">
+              {selectedBreakdown.steps.map((step, idx) => (
+                <div key={`${step.name}-${idx}`} className="p-4 bg-slate-50 rounded border border-slate-200 space-y-2">
+                  <div className="text-[10px] uppercase font-bold text-slate-400">{step.section}</div>
+                  <div className="text-sm font-bold text-slate-800">{step.name}</div>
+                  <div className="font-mono text-xs text-slate-700">{step.formula}</div>
+                  <div className="font-mono text-xs text-slate-500">{step.substitutedValues}</div>
+                  <div className="font-mono text-sm font-black text-[#00796b]">{step.result}</div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -1272,15 +1336,23 @@ export default function App() {
                         <div className="grid grid-cols-2 gap-4">
                           <div className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1">
                             <span className="text-[10px] uppercase font-bold text-slate-400">Extracted Unit Weight</span>
-                            <div className="text-xl font-black text-slate-900 font-mono">
+                            <button
+                              type="button"
+                              className="text-xl font-black text-slate-900 font-mono text-left hover:text-[#004ccd]"
+                              onClick={() => openBreakdown('Total Weight', estimation.items?.map(item => item.formulas?.weight) || [])}
+                            >
                               {estimation.summary.unitWeightKg} <span className="text-xs font-normal text-slate-500">kg</span>
-                            </div>
+                            </button>
                           </div>
                           <div className="p-3 bg-blue-50/50 rounded border border-blue-100/50 space-y-1">
                             <span className="text-[10px] uppercase font-bold text-[#004ccd]">Total Project Cost</span>
-                            <div className="text-xl font-black text-[#004ccd] font-mono">
+                            <button
+                              type="button"
+                              className="text-xl font-black text-[#004ccd] font-mono text-left hover:text-blue-800"
+                              onClick={() => openBreakdown('Total Project Cost', [findCalculationStep('Material cost'), findCalculationStep('Total estimated cost')])}
+                            >
                               {formatInr(estimation.summary.totalCost)}
-                            </div>
+                            </button>
                           </div>
                         </div>
 
@@ -1329,27 +1401,59 @@ export default function App() {
                               <tbody className="divide-y divide-slate-100 font-mono text-slate-700">
                                 <tr>
                                   <td className="p-2.5 font-sans font-medium text-slate-900">Main Profile / Rod ({params.materialForm})</td>
-                                  <td className="p-2.5 text-right">{estimation.summary.profileWeightKg.toFixed(3)} kg</td>
-                                  <td className="p-2.5 text-right">{(estimation.summary.profileWeightKg * estimation.summary.qty).toFixed(3)} kg</td>
+                                  <td className="p-2.5 text-right">
+                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Main Profile Weight', [estimation.items?.[0]?.formulas?.weight])}>
+                                      {estimation.summary.profileWeightKg.toFixed(3)} kg
+                                    </button>
+                                  </td>
+                                  <td className="p-2.5 text-right">
+                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Main Profile Total Weight', [estimation.items?.[0]?.formulas?.weight])}>
+                                      {(estimation.summary.profileWeightKg * estimation.summary.qty).toFixed(3)} kg
+                                    </button>
+                                  </td>
                                 </tr>
                                 {estimation.summary.topPlateWeightKg > 0 && (
                                   <tr>
                                     <td className="p-2.5 font-sans font-medium text-slate-900">Top Inlay Plate</td>
-                                    <td className="p-2.5 text-right">{estimation.summary.topPlateWeightKg.toFixed(3)} kg</td>
-                                    <td className="p-2.5 text-right">{(estimation.summary.topPlateWeightKg * estimation.summary.qty).toFixed(3)} kg</td>
+                                    <td className="p-2.5 text-right">
+                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Top Plate Weight', [estimation.items?.find(item => item.name.toLowerCase().includes('top'))?.formulas?.weight])}>
+                                        {estimation.summary.topPlateWeightKg.toFixed(3)} kg
+                                      </button>
+                                    </td>
+                                    <td className="p-2.5 text-right">
+                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Top Plate Total Weight', [estimation.items?.find(item => item.name.toLowerCase().includes('top'))?.formulas?.weight])}>
+                                        {(estimation.summary.topPlateWeightKg * estimation.summary.qty).toFixed(3)} kg
+                                      </button>
+                                    </td>
                                   </tr>
                                 )}
                                 {estimation.summary.bottomPlateWeightKg > 0 && (
                                   <tr>
                                     <td className="p-2.5 font-sans font-medium text-slate-900">Bottom Support Plate</td>
-                                    <td className="p-2.5 text-right">{estimation.summary.bottomPlateWeightKg.toFixed(3)} kg</td>
-                                    <td className="p-2.5 text-right">{(estimation.summary.bottomPlateWeightKg * estimation.summary.qty).toFixed(3)} kg</td>
+                                    <td className="p-2.5 text-right">
+                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Bottom Plate Weight', [estimation.items?.find(item => item.name.toLowerCase().includes('bottom'))?.formulas?.weight])}>
+                                        {estimation.summary.bottomPlateWeightKg.toFixed(3)} kg
+                                      </button>
+                                    </td>
+                                    <td className="p-2.5 text-right">
+                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Bottom Plate Total Weight', [estimation.items?.find(item => item.name.toLowerCase().includes('bottom'))?.formulas?.weight])}>
+                                        {(estimation.summary.bottomPlateWeightKg * estimation.summary.qty).toFixed(3)} kg
+                                      </button>
+                                    </td>
                                   </tr>
                                 )}
                                 <tr className="bg-slate-50 font-bold text-slate-900">
                                   <td className="p-2.5 font-sans">Accumulated Material Total</td>
-                                  <td className="p-2.5 text-right">{estimation.summary.unitWeightKg.toFixed(3)} kg</td>
-                                  <td className="p-2.5 text-right">{estimation.summary.totalWeightKg.toFixed(3)} kg</td>
+                                  <td className="p-2.5 text-right">
+                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Accumulated Material Weight', estimation.items?.map(item => item.formulas?.weight) || [])}>
+                                      {estimation.summary.unitWeightKg.toFixed(3)} kg
+                                    </button>
+                                  </td>
+                                  <td className="p-2.5 text-right">
+                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Total Material Weight', estimation.items?.map(item => item.formulas?.weight) || [])}>
+                                      {estimation.summary.totalWeightKg.toFixed(3)} kg
+                                    </button>
+                                  </td>
                                 </tr>
                               </tbody>
                             </table>
@@ -1376,10 +1480,24 @@ export default function App() {
                                     <tr key={`${item.name}-${idx}`}>
                                       <td className="p-2.5 font-sans font-medium text-slate-900">{item.name}</td>
                                       <td className="p-2.5 text-right">{item.quantity}</td>
-                                      <td className="p-2.5 text-right underline decoration-dotted underline-offset-4">{item.weightKg.toFixed(3)} kg</td>
-                                      <td className="p-2.5 text-right underline decoration-dotted underline-offset-4">{formatInr(item.materialCost)}</td>
+                                      <td className="p-2.5 text-right">
+                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Weight`, [item.formulas?.weight])}>
+                                          {item.weightKg.toFixed(3)} kg
+                                        </button>
+                                      </td>
+                                      <td className="p-2.5 text-right">
+                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Material Cost`, [item.formulas?.material])}>
+                                          {formatInr(item.materialCost)}
+                                        </button>
+                                      </td>
                                       <td className="p-2.5 text-right">{item.partsPerStock ? `${item.partsPerStock}/${item.stockForm}` : '-'}</td>
-                                      <td className="p-2.5 text-right">{item.scrapWeightKg ? `${item.scrapWeightKg.toFixed(3)} kg (${formatInr(item.scrapValue || 0)})` : '-'}</td>
+                                      <td className="p-2.5 text-right">
+                                        {item.scrapWeightKg ? (
+                                          <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Scrap`, [findCalculationStep('Scrap value')])}>
+                                            {item.scrapWeightKg.toFixed(3)} kg ({formatInr(item.scrapValue || 0)})
+                                          </button>
+                                        ) : '-'}
+                                      </td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -1422,14 +1540,30 @@ export default function App() {
                                   {estimation.processDetails.map((pd, idx) => (
                                     <tr key={idx}>
                                       <td className="p-2.5 font-sans font-medium text-slate-900">{pd.name}</td>
-                                      <td className="p-2.5 text-right">{formatInr(pd.unitCost)}</td>
-                                      <td className="p-2.5 text-right font-bold text-slate-900">{formatInr(pd.cost)}</td>
+                                      <td className="p-2.5 text-right">
+                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${pd.name} Cost`, [findProcessStep(pd.name)])}>
+                                          {formatInr(pd.unitCost)}
+                                        </button>
+                                      </td>
+                                      <td className="p-2.5 text-right font-bold text-slate-900">
+                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${pd.name} Cost`, [findProcessStep(pd.name)])}>
+                                          {formatInr(pd.cost)}
+                                        </button>
+                                      </td>
                                     </tr>
                                   ))}
                                   <tr className="bg-slate-50 font-bold text-slate-900 border-t border-slate-200">
                                     <td className="p-2.5 font-sans">Operational Process Total</td>
                                     <td className="p-2.5 text-right">-</td>
-                                    <td className="p-2.5 text-right">{formatInr(estimation.summary.processCost)}</td>
+                                    <td className="p-2.5 text-right">
+                                      <button
+                                        type="button"
+                                        className={valueButtonClass}
+                                        onClick={() => openBreakdown('Operational Process Total', estimation.processDetails.map(pd => findProcessStep(pd.name)))}
+                                      >
+                                        {formatInr(estimation.summary.processCost)}
+                                      </button>
+                                    </td>
                                   </tr>
                                 </tbody>
                               </table>
@@ -1441,15 +1575,33 @@ export default function App() {
                         <div className="pt-3 border-t border-slate-200 space-y-1 text-slate-600 font-medium">
                           <div className="flex justify-between">
                             <span>Base Material Cost ({estimation.summary.totalWeightKg.toFixed(3)} kg @ Rs {params.materialRate}/kg):</span>
-                            <span className="font-mono text-slate-900">{formatInr(estimation.summary.materialCost)}</span>
+                            <button
+                              type="button"
+                              className={`${valueButtonClass} text-slate-900`}
+                              onClick={() => openBreakdown('Base Material Cost', [findCalculationStep('Material cost')])}
+                            >
+                              {formatInr(estimation.summary.materialCost)}
+                            </button>
                           </div>
                           <div className="flex justify-between">
                             <span>Process & Routing Surcharges:</span>
-                            <span className="font-mono text-slate-900">{formatInr(estimation.summary.processCost)}</span>
+                            <button
+                              type="button"
+                              className={`${valueButtonClass} text-slate-900`}
+                              onClick={() => openBreakdown('Process & Routing Surcharges', estimation.processDetails.map(pd => findProcessStep(pd.name)))}
+                            >
+                              {formatInr(estimation.summary.processCost)}
+                            </button>
                           </div>
                           <div className="flex justify-between font-bold text-slate-900 text-sm pt-2 border-t border-dashed border-slate-200">
                             <span>Calculated Grand Estimate:</span>
-                            <span className="font-mono text-[#004ccd]">{formatInr(estimation.summary.totalCost)}</span>
+                            <button
+                              type="button"
+                              className={`${valueButtonClass} text-[#004ccd]`}
+                              onClick={() => openBreakdown('Calculated Grand Estimate', [findCalculationStep('Material cost'), findCalculationStep('Total estimated cost')])}
+                            >
+                              {formatInr(estimation.summary.totalCost)}
+                            </button>
                           </div>
                         </div>
 
