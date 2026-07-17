@@ -6,6 +6,11 @@ function asString(value: unknown, fallback = '') {
   return value === undefined || value === null || value === '' ? fallback : String(value);
 }
 
+function asNonNegativeNumber(value: unknown, fallback = 0) {
+  const parsed = Number(asString(value, String(fallback)));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function appendIfValue(formData: FormData, key: string, value: unknown) {
   if (value !== undefined && value !== null && value !== '') {
     formData.append(key, String(value));
@@ -133,6 +138,10 @@ export async function POST(request: Request) {
     formData.append('bend_count', asString(params.bendCount, params.processes?.includes('Bending') ? '1' : '0'));
     formData.append('bend_rate_per_stroke', asString(params.bendRate, '5'));
     formData.append('press_machine_hits', asString(params.pressHits, '0'));
+    formData.append('press_machine_rate_per_hit', asString(params.pressRate, '5'));
+    formData.append('scrap_rate_per_kg', asString(params.scrapRate, '0'));
+    formData.append('tacking_labor_fixed', asString(params.tackingFixed, '0'));
+    formData.append('include_tacking_labor', String(asNonNegativeNumber(params.tackingFixed, 0) > 0));
     formData.append('surface_type', params.processes?.includes('Surface') ? 'painted' : 'none');
 
     const response = await fetch(`${API_BASE}/estimate`, {

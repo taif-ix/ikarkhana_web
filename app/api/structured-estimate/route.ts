@@ -6,6 +6,25 @@ function asString(value: unknown, fallback = '') {
   return value === undefined || value === null || value === '' ? fallback : String(value);
 }
 
+function asNonNegativeNumber(value: unknown, fallback = 0) {
+  const parsed = Number(asString(value, String(fallback)));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function costPayload(params: any, extraction: any) {
+  return {
+    extraction,
+    material_rate_per_kg: asNonNegativeNumber(params.materialRate, 240),
+    laser_cutting_rate_per_meter: asNonNegativeNumber(params.cutRate, 200),
+    press_machine_rate_per_hit: asNonNegativeNumber(params.pressRate, 5),
+    bend_rate_per_bend: asNonNegativeNumber(params.bendRate, 2),
+    welding_labor_per_meter: asNonNegativeNumber(params.weldRate, 22),
+    painting_rate_per_m2: asNonNegativeNumber(params.surfaceRate, 120),
+    scrap_rate_per_kg: asNonNegativeNumber(params.scrapRate, 0),
+    tacking_fixed_setup_cost: asNonNegativeNumber(params.tackingFixed, 0),
+  };
+}
+
 function dataUrlToFile(dataUrl: string, filename = 'uploaded-diagram') {
   const [header, base64] = dataUrl.split(',');
   const mimeMatch = header.match(/data:(.*?);base64/);
@@ -18,6 +37,26 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const image = String(body.image || '');
+    const params = body.params || {};
+    const extraction = body.extraction || body.structuredBreakdown || body.structuredExtraction;
+
+    if (extraction) {
+      const response = await fetch(`${API_BASE}/calculate-cost-breakdown`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(costPayload(params, extraction)),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        return NextResponse.json(
+          { success: false, error: payload.detail || `Backend returned ${response.status}` },
+          { status: response.status }
+        );
+      }
+
+      return NextResponse.json({ success: true, data: payload, source: 'cached_structured_extraction' });
+    }
 
     if (!image || image.startsWith('http')) {
       return NextResponse.json(
@@ -26,16 +65,16 @@ export async function POST(request: Request) {
       );
     }
 
-    const params = body.params || {};
     const formData = new FormData();
     formData.append('diagram', dataUrlToFile(image, body.filename || 'uploaded-diagram'));
-    formData.append('material_rate_per_kg', asString(params.materialRate, '240'));
-    formData.append('laser_cutting_rate_per_meter', asString(params.cutRate, '200'));
-    formData.append('press_machine_rate_per_hit', asString(params.pressRate, '5'));
-    formData.append('bend_rate_per_bend', asString(params.bendRate, '2'));
-    formData.append('welding_labor_per_meter', asString(params.weldRate, '22'));
-    formData.append('painting_rate_per_m2', asString(params.surfaceRate, '120'));
-    formData.append('tacking_fixed_setup_cost', asString(params.tackingFixed, '1040'));
+    formData.append('material_rate_per_kg', String(asNonNegativeNumber(params.materialRate, 240)));
+    formData.append('laser_cutting_rate_per_meter', String(asNonNegativeNumber(params.cutRate, 200)));
+    formData.append('press_machine_rate_per_hit', String(asNonNegativeNumber(params.pressRate, 5)));
+    formData.append('bend_rate_per_bend', String(asNonNegativeNumber(params.bendRate, 2)));
+    formData.append('welding_labor_per_meter', String(asNonNegativeNumber(params.weldRate, 22)));
+    formData.append('painting_rate_per_m2', String(asNonNegativeNumber(params.surfaceRate, 120)));
+    formData.append('scrap_rate_per_kg', String(asNonNegativeNumber(params.scrapRate, 0)));
+    formData.append('tacking_fixed_setup_cost', String(asNonNegativeNumber(params.tackingFixed, 0)));
 
     const response = await fetch(`${API_BASE}/extract-cost-breakdown`, {
       method: 'POST',
