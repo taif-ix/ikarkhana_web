@@ -139,7 +139,7 @@ export async function POST(request: Request) {
     formData.append('bend_rate_per_stroke', asString(params.bendRate, '5'));
     formData.append('press_machine_hits', asString(params.pressHits, '0'));
     formData.append('press_machine_rate_per_hit', asString(params.pressRate, '5'));
-    formData.append('scrap_rate_per_kg', asString(params.scrapRate, '0'));
+    formData.append('scrap_rate_per_kg', asString(params.scrapRate, '28'));
     formData.append('tacking_labor_fixed', asString(params.tackingFixed, '0'));
     formData.append('include_tacking_labor', String(asNonNegativeNumber(params.tackingFixed, 0) > 0));
     formData.append('surface_type', params.processes?.includes('Surface') ? 'painted' : 'none');

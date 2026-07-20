@@ -20,7 +20,7 @@ function costPayload(params: any, extraction: any) {
     bend_rate_per_bend: asNonNegativeNumber(params.bendRate, 2),
     welding_labor_per_meter: asNonNegativeNumber(params.weldRate, 22),
     painting_rate_per_m2: asNonNegativeNumber(params.surfaceRate, 120),
-    scrap_rate_per_kg: asNonNegativeNumber(params.scrapRate, 0),
+    scrap_rate_per_kg: asNonNegativeNumber(params.scrapRate, 28),
     tacking_fixed_setup_cost: asNonNegativeNumber(params.tackingFixed, 0),
   };
 }
@@ -39,8 +39,9 @@ export async function POST(request: Request) {
     const image = String(body.image || '');
     const params = body.params || {};
     const extraction = body.extraction || body.structuredBreakdown || body.structuredExtraction;
+    const childDrawings = Array.isArray(body.childDrawings) ? body.childDrawings : [];
 
-    if (extraction) {
+    if (extraction && childDrawings.length === 0) {
       const response = await fetch(`${API_BASE}/calculate-cost-breakdown`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -67,13 +68,18 @@ export async function POST(request: Request) {
 
     const formData = new FormData();
     formData.append('diagram', dataUrlToFile(image, body.filename || 'uploaded-diagram'));
+    childDrawings.forEach((drawing: any) => {
+      if (drawing?.image) {
+        formData.append('child_diagrams', dataUrlToFile(String(drawing.image), drawing.filename || 'child-detail-drawing'));
+      }
+    });
     formData.append('material_rate_per_kg', String(asNonNegativeNumber(params.materialRate, 240)));
     formData.append('laser_cutting_rate_per_meter', String(asNonNegativeNumber(params.cutRate, 200)));
     formData.append('press_machine_rate_per_hit', String(asNonNegativeNumber(params.pressRate, 5)));
     formData.append('bend_rate_per_bend', String(asNonNegativeNumber(params.bendRate, 2)));
     formData.append('welding_labor_per_meter', String(asNonNegativeNumber(params.weldRate, 22)));
     formData.append('painting_rate_per_m2', String(asNonNegativeNumber(params.surfaceRate, 120)));
-    formData.append('scrap_rate_per_kg', String(asNonNegativeNumber(params.scrapRate, 0)));
+    formData.append('scrap_rate_per_kg', String(asNonNegativeNumber(params.scrapRate, 28)));
     formData.append('tacking_fixed_setup_cost', String(asNonNegativeNumber(params.tackingFixed, 0)));
 
     const response = await fetch(`${API_BASE}/extract-cost-breakdown`, {

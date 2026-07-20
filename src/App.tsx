@@ -30,6 +30,7 @@ import {
   Clock,
   History,
   LayoutDashboard,
+  AlertTriangle,
   X,
   Maximize2
 } from 'lucide-react';
@@ -141,6 +142,15 @@ interface EstimationResult {
   structuredError?: string;
 }
 
+type EstimateLineItem = NonNullable<EstimationResult['items']>[number];
+
+interface BatchUploadFile {
+  name: string;
+  sizeMb: string;
+  image: string;
+  isChild: boolean;
+}
+
 interface CalculationStep {
   section: string;
   name: string;
@@ -149,9 +159,19 @@ interface CalculationStep {
   result: string;
 }
 
+interface ReferencedDrawing {
+  drawing_number: string;
+  file_name_hint?: string | null;
+  referenced_by_part_number?: string | null;
+  referenced_by_component?: string | null;
+  reason?: string;
+  required_for_costing?: boolean;
+}
+
 interface StructuredBreakdown {
   currency: string;
   part_name?: string | null;
+  referenced_drawings?: ReferencedDrawing[];
   per_part_breakdown: Array<{
     part_number: string;
     component_name?: string | null;
@@ -233,10 +253,16 @@ export default function App() {
   const [uploadedImageData, setUploadedImageData] = useState<string>('');
   const [uploadedImageName, setUploadedImageName] = useState<string>('');
   const [structuredBreakdownCache, setStructuredBreakdownCache] = useState<StructuredBreakdown | null>(null);
+  const [batchUploadFiles, setBatchUploadFiles] = useState<BatchUploadFile[]>([]);
+  const [selectedBatchParentName, setSelectedBatchParentName] = useState<string>('');
+  const [childDrawingUploads, setChildDrawingUploads] = useState<Record<string, string>>({});
+  const [childDrawingImages, setChildDrawingImages] = useState<Record<string, string>>({});
+  const [allowMissingChildDrawings, setAllowMissingChildDrawings] = useState(false);
 
   // AI Extraction logging & analysis
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isExtractionComplete, setIsExtractionComplete] = useState(false);
+  const [scanPreviewPhase, setScanPreviewPhase] = useState<'scan' | 'reference'>('scan');
   const [apiSource, setApiSource] = useState<'simulation_fallback' | 'gemini_api' | null>(null);
 
   // zoom preview
@@ -245,6 +271,11 @@ export default function App() {
   const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
   const [previewAspectRatio, setPreviewAspectRatio] = useState<number>(1.414);
   const [selectedPartPreview, setSelectedPartPreview] = useState<StructuredBreakdown['per_part_breakdown'][number] | null>(null);
+  const [selectedReferencePreview, setSelectedReferencePreview] = useState<string | null>(null);
+  const [selectedReferencePart, setSelectedReferencePart] = useState<StructuredBreakdown['per_part_breakdown'][number] | null>(null);
+  const [selectedPartDetails, setSelectedPartDetails] = useState<StructuredBreakdown['per_part_breakdown'][number] | null>(null);
+  const [selectedNestingItem, setSelectedNestingItem] = useState<EstimateLineItem | null>(null);
+  const [isPartSummaryOpen, setIsPartSummaryOpen] = useState(false);
   const [selectedBreakdown, setSelectedBreakdown] = useState<{ title: string; steps: CalculationStep[] } | null>(null);
 
   // Form parameters
@@ -323,17 +354,85 @@ export default function App() {
     e.stopPropagation();
     setDragActive(false);
 
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processSelectedFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      void stageSelectedFiles(Array.from(e.dataTransfer.files));
     }
   };
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0];
-    if (selectedFile) {
-      processSelectedFile(selectedFile);
+    const selectedFiles = Array.from(e.target.files || []);
+    if (selectedFiles.length > 0) {
+      void stageSelectedFiles(selectedFiles);
     }
     e.target.value = '';
+  };
+
+  const readFileAsDataUrl = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+  const stageSelectedFiles = async (files: File[]) => {
+    try {
+      const staged = await Promise.all(files.map(async (file, index) => ({
+        name: file.name,
+        sizeMb: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+        image: await readFileAsDataUrl(file),
+        isChild: index > 0,
+      })));
+      setBatchUploadFiles(staged);
+      setSelectedBatchParentName(staged[0]?.name || '');
+      setCurrentScreen('landing');
+      triggerToast(`${staged.length} file${staged.length > 1 ? 's' : ''} staged. Review parent/child files, then proceed.`);
+    } catch {
+      triggerToast('Could not read one or more uploaded files. Please try again.');
+    }
+  };
+
+  const proceedWithUploadedFiles = async () => {
+    const parent = batchUploadFiles.find(file => file.name === selectedBatchParentName) || batchUploadFiles[0];
+    if (!parent) {
+      triggerToast('Upload at least one drawing file first.');
+      return;
+    }
+    const childFiles = batchUploadFiles.filter(file => file.name !== parent.name);
+    setChildDrawingUploads(Object.fromEntries(childFiles.map(file => [file.name.replace(/\.[^.]+$/, ''), file.name])));
+    setChildDrawingImages(Object.fromEntries(childFiles.map(file => [file.name.replace(/\.[^.]+$/, ''), file.image])));
+    await startExtractionFromData(parent.image, parent.name, parent.sizeMb, childFiles);
+  };
+
+  const drawingBase = (name: string) => name.toLowerCase().replace(/\.[^.]+$/, '').trim();
+
+  const expectedChildFileHints = (parentName: string) => {
+    const dependencyMap: Record<string, string[]> = {
+      ls10257: ['LS10269.tif'],
+    };
+    return dependencyMap[drawingBase(parentName)] || [];
+  };
+
+  const fileMatchesHint = (file: BatchUploadFile, hint: string) =>
+    drawingBase(file.name) === drawingBase(hint);
+
+  const appendChildFilesToBatch = async (files: File[]) => {
+    if (files.length === 0) return;
+    try {
+      const stagedChildren = await Promise.all(files.map(async (file) => ({
+        name: file.name,
+        sizeMb: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+        image: await readFileAsDataUrl(file),
+        isChild: true,
+      })));
+      setBatchUploadFiles(prev => {
+        const existing = new Set(prev.map(file => file.name));
+        return [...prev, ...stagedChildren.filter(file => !existing.has(file.name))];
+      });
+      triggerToast(`${stagedChildren.length} child/detail file${stagedChildren.length > 1 ? 's' : ''} added.`);
+    } catch {
+      triggerToast('Could not read child/detail files. Please try again.');
+    }
   };
 
   // Convert uploaded drawing to base64 preview and run extraction pipeline
@@ -344,9 +443,13 @@ export default function App() {
     setActiveTab('estimator');
     setSidebarTab('estimator');
     setIsAnalyzing(true);
+    setScanPreviewPhase('scan');
     setIsExtractionComplete(false);
     setEstimation(null);
     setStructuredBreakdownCache(null);
+    setChildDrawingUploads({});
+    setChildDrawingImages({});
+    setAllowMissingChildDrawings(false);
 
     const reader = new FileReader();
     reader.onloadend = async () => {
@@ -375,6 +478,42 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  const startExtractionFromData = async (
+    base64String: string,
+    name: string,
+    size: string,
+    childFiles: BatchUploadFile[] = [],
+  ) => {
+    setFileName(name);
+    setFileSize(size);
+    setCurrentScreen('workspace');
+    setActiveTab('estimator');
+    setSidebarTab('estimator');
+    setIsAnalyzing(true);
+    setScanPreviewPhase('scan');
+    setIsExtractionComplete(false);
+    setEstimation(null);
+    setStructuredBreakdownCache(null);
+    setAllowMissingChildDrawings(childFiles.length > 0);
+    setUploadedImageData(base64String);
+    setUploadedImageName(name);
+    setFilePreview(base64String);
+    try {
+      const response = await fetch('/api/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: base64String, filename: name }),
+      });
+      const result = await response.json();
+      if (result.success && result.image) {
+        setFilePreview(result.image);
+      }
+    } catch {
+      setFilePreview(base64String);
+    }
+    void runExtractionPipeline(base64String, name, childFiles);
+  };
+
   // Select sample drawing instantly
   const handleSelectSample = () => {
     setFileName('Chassis_Bracket_Drawing_v2.4.dwg');
@@ -382,18 +521,33 @@ export default function App() {
     setFilePreview(DEFAULT_IMAGE_URL);
     setUploadedImageData('');
     setUploadedImageName('');
+    setChildDrawingUploads({});
+    setChildDrawingImages({});
+    setAllowMissingChildDrawings(false);
     runExtractionPipeline(DEFAULT_IMAGE_URL, 'Chassis_Bracket_Drawing_v2.4.dwg');
   };
 
   // Pipeline simulation or real Gemini extraction
-  const runExtractionPipeline = async (imgData: string, name: string) => {
+  const runExtractionPipeline = async (imgData: string, name: string, batchChildFiles: BatchUploadFile[] = []) => {
     setIsAnalyzing(true);
+    setScanPreviewPhase('scan');
     setIsExtractionComplete(false);
     setEstimation(null);
     setStructuredBreakdownCache(null);
+    if (batchChildFiles.length === 0) {
+      setChildDrawingUploads({});
+      setChildDrawingImages({});
+    }
+    setAllowMissingChildDrawings(false);
     setCurrentScreen('workspace');
     setActiveTab('estimator');
     setSidebarTab('estimator');
+    const scanDelay = new Promise<void>((resolve) => {
+      window.setTimeout(() => {
+        setScanPreviewPhase('reference');
+        resolve();
+      }, 6000);
+    });
 
     try {
       const response = await fetch('/api/extract', {
@@ -417,6 +571,11 @@ export default function App() {
               body: JSON.stringify({
                 image: imgData,
                 filename: name || uploadedImageName || fileName || 'uploaded-diagram',
+                childDrawings: batchChildFiles.map(file => ({
+                  drawingNumber: file.name.replace(/\.[^.]+$/, ''),
+                  filename: file.name,
+                  image: file.image,
+                })),
                 params: result.data,
               }),
             });
@@ -472,6 +631,7 @@ export default function App() {
         processes: ['Cutting', 'Welding', 'Surface', 'Bending']
       });
     } finally {
+      await scanDelay;
       setIsAnalyzing(false);
       setIsExtractionComplete(true);
     }
@@ -482,8 +642,32 @@ export default function App() {
     runExtractionPipeline(filePreview, fileName || 'Manual_Extract_Drawing.dwg');
   };
 
+  const referencedDrawings = structuredBreakdownCache?.referenced_drawings || estimation?.structuredBreakdown?.referenced_drawings || [];
+  const missingReferencedDrawings = referencedDrawings.filter(
+    (drawing) => drawing.required_for_costing !== false && !childDrawingUploads[drawing.drawing_number]
+  );
+  const hasBlockingMissingChildDrawings = missingReferencedDrawings.length > 0 && !allowMissingChildDrawings;
+
+  const handleChildDrawingUpload = (drawingNumber: string, file?: File | null) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setChildDrawingUploads((prev) => ({ ...prev, [drawingNumber]: file.name }));
+      setChildDrawingImages((prev) => ({ ...prev, [drawingNumber]: reader.result as string }));
+      setAllowMissingChildDrawings(false);
+      triggerToast(`Child drawing ${drawingNumber} attached: ${file.name}`);
+    };
+    reader.onerror = () => triggerToast(`Could not read ${file.name}. Please try again.`);
+    reader.readAsDataURL(file);
+  };
+
   // Trigger costing calculations
   const calculateCost = async () => {
+    if (hasBlockingMissingChildDrawings) {
+      triggerToast('Upload missing child drawings or choose calculate without missing files.');
+      return;
+    }
+
     setIsCalculating(true);
     try {
       const response = await fetch('/api/estimate', {
@@ -497,8 +681,13 @@ export default function App() {
         let structuredError: string | undefined;
 
         const cachedStructured = structuredBreakdownCache || estimation?.structuredBreakdown;
+        const attachedChildDrawings = Object.entries(childDrawingImages).map(([drawingNumber, image]) => ({
+          drawingNumber,
+          filename: childDrawingUploads[drawingNumber] || `${drawingNumber}.tif`,
+          image,
+        }));
 
-        if (cachedStructured) {
+        if (cachedStructured && attachedChildDrawings.length === 0) {
           try {
             const structuredResponse = await fetch('/api/structured-estimate', {
               method: 'POST',
@@ -526,6 +715,7 @@ export default function App() {
               body: JSON.stringify({
                 image: uploadedImageData,
                 filename: uploadedImageName || fileName || 'uploaded-diagram',
+                childDrawings: attachedChildDrawings,
                 params,
               }),
             });
@@ -678,7 +868,7 @@ export default function App() {
       metricRow('Bending', numberSafe(params.bendRate), 'INR/bend'),
       metricRow('Press cut', numberSafe(params.pressRate), 'INR/hit'),
       metricRow('Tacking setup', numberSafe(params.tackingFixed), 'INR fixed'),
-      metricRow('Scrap value', numberSafe(params.scrapRate), 'INR/kg'),
+      metricRow('Scrap value', numberSafe(params.scrapRate || 28), 'INR/kg'),
       blankRow(),
       sectionRow('Extracted Parameters'),
       headerRow(['Field', 'Value', 'Unit']),
@@ -981,6 +1171,191 @@ export default function App() {
     });
   };
 
+  const allocatedScrapBreakdownSteps = (): CalculationStep[] => {
+    const structured = estimation?.structuredBreakdown || structuredBreakdownCache;
+    if (structured?.per_part_breakdown?.length) {
+      const partSteps = structured.per_part_breakdown.map((part) => {
+        const scrapEach = Number(part.weight_ledger?.unit_scrap_waste_weight_kg || 0);
+        const qty = Number(part.per_set_qty || 1);
+        const totalScrap = scrapEach * qty;
+        const name = part.component_name || part.tube_type || part.component_type || `Part ${part.part_number}`;
+        return {
+          section: 'Scrap',
+          name: `Part ${part.part_number} ${name}`,
+          formula: 'Allocated scrap = unit scrap / waste weight x set quantity',
+          substitutedValues: `${scrapEach.toFixed(3)} kg x ${qty} pcs`,
+          result: `${totalScrap.toFixed(3)} kg`,
+        };
+      });
+      const total = structured.per_part_breakdown.reduce((sum, part) => (
+        sum + Number(part.weight_ledger?.unit_scrap_waste_weight_kg || 0) * Number(part.per_set_qty || 1)
+      ), 0);
+      const value = total * displayedScrapRate;
+      return [
+        ...partSteps,
+        {
+          section: 'Scrap',
+          name: 'Allocated scrap total',
+          formula: 'Total allocated scrap = sum of all part scrap weights',
+          substitutedValues: partSteps.map(step => step.result).join(' + '),
+          result: `${total.toFixed(3)} kg`,
+        },
+        {
+          section: 'Scrap Value',
+          name: 'Scrap/offcut resale value',
+          formula: 'Scrap value = total allocated scrap weight x scrap rate',
+          substitutedValues: `${total.toFixed(3)} kg x Rs ${displayedScrapRate}/kg`,
+          result: formatInr(value),
+        },
+      ];
+    }
+
+    if (estimation?.stockSummary) {
+      const weight = Number(estimation.stockSummary.totalScrapWeightKg || 0);
+      const value = weight * displayedScrapRate;
+      return [
+        {
+          section: 'Scrap',
+          name: 'Stock summary scrap/offcut',
+          formula: 'Allocated scrap = stock/offcut weight calculated from rod or sheet nesting',
+          substitutedValues: estimation.stockSummary.approach || 'Stock nesting estimate',
+          result: `${weight.toFixed(3)} kg`,
+        },
+        {
+          section: 'Scrap Value',
+          name: 'Scrap/offcut resale value',
+          formula: 'Scrap value = allocated scrap weight x scrap rate',
+          substitutedValues: `${weight.toFixed(3)} kg x Rs ${displayedScrapRate}/kg`,
+          result: formatInr(value),
+        },
+      ];
+    }
+    return [];
+  };
+
+  const nestingValueBreakdownSteps = (item: EstimateLineItem, valueType: 'weight' | 'scrapWeight' | 'scrapValue'): CalculationStep[] => {
+    if (valueType === 'weight') {
+      return item.formulas?.weight ? [item.formulas.weight] : [];
+    }
+    const parsed = parseNestingNumbers(item);
+    if (valueType === 'scrapWeight') {
+      return [
+        {
+          section: 'Stock',
+          name: `${item.name} scrap weight`,
+          formula: parsed.isSheet
+            ? 'Scrap weight is leftover sheet/offcut weight allocated to this part.'
+            : 'Scrap weight is leftover rod/profile weight allocated to this part.',
+          substitutedValues: `${item.nestingApproach || 'Nesting approach not available'}; allocated scrap = ${Number(item.scrapWeightKg || 0).toFixed(3)} kg`,
+          result: `${Number(item.scrapWeightKg || 0).toFixed(3)} kg`,
+        },
+      ];
+    }
+    return [
+      {
+        section: 'Stock',
+        name: `${item.name} scrap value`,
+        formula: 'Scrap value = scrap weight x scrap rate',
+        substitutedValues: `${Number(item.scrapWeightKg || 0).toFixed(3)} kg x Rs ${displayedScrapRate}/kg`,
+        result: formatInr(item.scrapValue || (Number(item.scrapWeightKg || 0) * displayedScrapRate)),
+      },
+    ];
+  };
+
+  const valueSourceBreakdownSteps = (step: CalculationStep): CalculationStep[] => {
+    const text = `${step.section} ${step.name} ${step.formula} ${step.substitutedValues}`.toLowerCase();
+    const valueText = cleanBreakdownText(step.substitutedValues);
+    const numberMatches = valueText.match(/[-+]?\d*\.?\d+/g) || [];
+    const formulaRows: CalculationStep[] = [];
+    const add = (name: string, formula: string, substitutedValues: string, result: string) => {
+      formulaRows.push({ section: 'Value Breakdown', name, formula, substitutedValues, result });
+    };
+
+    if (text.includes('scrap') && text.includes('rate')) {
+      const scrapWeight = numberMatches[0] || '0';
+      const scrapRate = numberMatches[1] || String(displayedScrapRate || 0);
+      add('Scrap weight', 'Taken from part scrap/offcut calculation', valueText, `${scrapWeight} kg`);
+      add('Scrap rate', 'Taken from editable Scrap Value rate', `Current UI rate = Rs ${displayedScrapRate}/kg`, `Rs ${scrapRate}/kg`);
+      add('Scrap value', 'Scrap value = scrap weight x scrap rate', `${scrapWeight} kg x Rs ${scrapRate}/kg`, step.result);
+      return formulaRows;
+    }
+
+    if (text.includes('laser')) {
+      const mm = numberMatches[0] || '0';
+      const meter = numberMatches[1] || String(Number(mm) / 1000);
+      const rate = numberMatches[numberMatches.length - 1] || String(params.cutRate || 0);
+      add('Cutting length in mm', 'Extracted laser cut length from diagram', valueText, `${mm} mm`);
+      add('Convert mm to meter', 'meter = mm / 1000', `${mm} / 1000`, `${meter} m`);
+      add('Laser rate', 'Taken from editable Laser Cut Rate', `Current UI rate = Rs ${params.cutRate || 0}/m`, `Rs ${rate}/m`);
+      add('Laser cutting cost', 'Cost = length in meter x laser rate', `${meter} m x Rs ${rate}/m`, step.result);
+      return formulaRows;
+    }
+
+    if (text.includes('press') || text.includes('punch')) {
+      const hits = numberMatches[0] || '0';
+      const rate = numberMatches[1] || String(params.pressRate || 0);
+      add('Press hits', 'Extracted count of press/punch operations', valueText, `${hits} hits`);
+      add('Press rate', 'Taken from editable Press Cut Rate', `Current UI rate = Rs ${params.pressRate || 0}/hit`, `Rs ${rate}/hit`);
+      add('Press cost', 'Cost = press hits x rate per hit', `${hits} hits x Rs ${rate}/hit`, step.result);
+      return formulaRows;
+    }
+
+    if (text.includes('bend')) {
+      const bends = numberMatches[0] || '0';
+      const rate = numberMatches[1] || String(params.bendRate || 0);
+      add('Bend count', 'Extracted number of bends from part geometry', valueText, `${bends} bends`);
+      add('Bend rate', 'Taken from editable Bending rate', `Current UI rate = Rs ${params.bendRate || 0}/bend`, `Rs ${rate}/bend`);
+      add('Bending cost', 'Cost = bend count x rate per bend', `${bends} x Rs ${rate}/bend`, step.result);
+      return formulaRows;
+    }
+
+    if (text.includes('weld')) {
+      const mm = numberMatches[0] || '0';
+      const meter = numberMatches[1] || String(Number(mm) / 1000);
+      const rate = numberMatches[numberMatches.length - 1] || String(params.weldRate || 0);
+      add('Weld length in mm', 'Extracted weld length from drawing/features', valueText, `${mm} mm`);
+      add('Convert mm to meter', 'meter = mm / 1000', `${mm} / 1000`, `${meter} m`);
+      add('Welding rate', 'Taken from editable Welding Labor rate', `Current UI rate = Rs ${params.weldRate || 0}/m`, `Rs ${rate}/m`);
+      add('Welding cost', 'Cost = weld length in meter x welding rate', `${meter} m x Rs ${rate}/m`, step.result);
+      return formulaRows;
+    }
+
+    if (text.includes('surface') || text.includes('paint')) {
+      const area = numberMatches[0] || '0';
+      const rate = numberMatches[numberMatches.length - 1] || String(params.surfaceRate || 0);
+      add('Surface area', 'Calculated from part outside/inside dimensions', valueText, `${area} m squared`);
+      add('Surface rate', 'Taken from editable Surface Finish rate', `Current UI rate = Rs ${params.surfaceRate || 0}/m squared`, `Rs ${rate}/m squared`);
+      add('Surface cost', 'Cost = surface area x surface rate', `${area} m squared x Rs ${rate}/m squared`, step.result);
+      return formulaRows;
+    }
+
+    if (text.includes('material cost')) {
+      const weight = numberMatches[0] || '0';
+      const rate = numberMatches[1] || String(params.materialRate || 0);
+      add('Part weight', 'Calculated from extracted dimensions and density', valueText, `${weight} kg`);
+      add('Material rate', 'Taken from editable Material Rate', `Current UI rate = Rs ${params.materialRate || 0}/kg`, `Rs ${rate}/kg`);
+      add('Material cost', 'Cost = part weight x material rate, adjusted by scrap if present', valueText, step.result);
+      return formulaRows;
+    }
+
+    return [
+      {
+        section: 'Values Used',
+        name: `Numbers used for ${step.name}`,
+        formula: 'The calculation uses the numeric values shown below.',
+        substitutedValues: valueText,
+        result: cleanBreakdownText(step.result),
+      },
+      {
+        section: 'Original Formula',
+        name: 'Formula and values used',
+        formula: cleanBreakdownText(step.formula),
+        substitutedValues: cleanBreakdownText(step.substitutedValues),
+        result: cleanBreakdownText(step.result),
+      },
+    ];
+  };
+
   const structuredDimensions = (part: StructuredBreakdown['per_part_breakdown'][number]) => {
     const dims = part.dimensions || {};
     return [
@@ -989,6 +1364,163 @@ export default function App() {
       dims.secondary_width_mm,
       dims.thickness_or_wall_thickness_mm,
     ].filter(value => value !== undefined && value !== null && Number(value) > 0).join(' x ') || '-';
+  };
+
+  const partDimensionBadges = (part: StructuredBreakdown['per_part_breakdown'][number]) => {
+    const dims = part.dimensions || {};
+    const badges: Array<{ label: string; value: string }> = [];
+    const addMetric = (label: string, value: unknown, unit = 'mm') => {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        const formatted = Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(3).replace(/\.?0+$/, '');
+        badges.push({ label, value: `${formatted} ${unit}` });
+      }
+    };
+
+    addMetric('Length', dims.length_mm);
+    addMetric('Width / OD', dims.width_or_outer_dia_mm);
+    addMetric('Height / B', dims.secondary_width_mm);
+    addMetric('Thickness', dims.thickness_or_wall_thickness_mm);
+    return badges;
+  };
+
+  const partTotalWeightKg = (part: StructuredBreakdown['per_part_breakdown'][number]) =>
+    Number(part.weight_ledger?.unit_net_finished_weight_kg || 0) + Number(part.weight_ledger?.unit_scrap_waste_weight_kg || 0);
+
+  const renderPartImageActions = (part: StructuredBreakdown['per_part_breakdown'][number], compact = false) => (
+    <div className="absolute inset-x-2 bottom-2 z-10 flex items-end justify-between gap-2 pointer-events-none">
+      <div className={`${compact ? 'px-2 py-1' : 'px-3 py-2'} rounded bg-slate-950/82 text-white shadow border border-white/10`}>
+        <div className={`${compact ? 'text-[8px]' : 'text-[9px]'} uppercase tracking-wider font-black text-cyan-200`}>Total weight</div>
+        <div className={`${compact ? 'text-[10px]' : 'text-xs'} font-mono font-black`}>
+          Net + scrap = {partTotalWeightKg(part).toFixed(3)} kg
+        </div>
+      </div>
+      <button
+        type="button"
+        className={`${compact ? 'px-2 py-1 text-[9px]' : 'px-3 py-2 text-xs'} rounded bg-[#004ccd] text-white font-black uppercase tracking-wider shadow pointer-events-auto hover:bg-blue-700`}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setSelectedPartDetails(part);
+        }}
+      >
+        Details
+      </button>
+    </div>
+  );
+
+  const parseNestingNumbers = (item: EstimateLineItem) => {
+    const text = item.nestingApproach || '';
+    const floorMatches = [...text.matchAll(/floor\(\s*([\d.]+)\s*\/\s*([\d.]+)\s*\)/g)];
+    const piecesMatch = text.match(/=\s*(\d+)\s*(?:pieces|parts)/i);
+    const leftoverMatch = text.match(/leftover\s*([\d.]+)\s*mm/i);
+    const stockLength = Number(floorMatches[0]?.[1] || (item.stockForm?.toLowerCase().includes('sheet') ? 2500 : 6000));
+    const pieceLength = Number(floorMatches[0]?.[2] || 0);
+    const stockWidth = Number(floorMatches[1]?.[1] || 1250);
+    const pieceWidth = Number(floorMatches[1]?.[2] || 0);
+    return {
+      stockLength,
+      stockWidth,
+      pieceLength,
+      pieceWidth,
+      pieces: Number(piecesMatch?.[1] || item.partsPerStock || 1),
+      leftover: Number(leftoverMatch?.[1] || 0),
+      isSheet: (item.stockForm || item.stockSize || text).toLowerCase().includes('sheet') || text.toLowerCase().includes('2500 x 1250'),
+    };
+  };
+
+  const renderNestingVisual = (item: EstimateLineItem) => {
+    const parsed = parseNestingNumbers(item);
+    if (parsed.isSheet) {
+      const cols = parsed.pieceLength > 0 ? Math.max(Math.floor(parsed.stockLength / parsed.pieceLength), 1) : Math.ceil(Math.sqrt(parsed.pieces));
+      const rows = parsed.pieceWidth > 0 ? Math.max(Math.floor(parsed.stockWidth / parsed.pieceWidth), 1) : Math.ceil(parsed.pieces / cols);
+      const visibleCols = Math.min(cols, 12);
+      const visibleRows = Math.min(rows, 6);
+      const shown = visibleCols * visibleRows;
+      return (
+        <div className="space-y-4">
+          <div className="relative bg-slate-100 border-2 border-slate-900 rounded-lg overflow-hidden aspect-[2/1] shadow-inner">
+            <div className="absolute inset-3 bg-white border border-slate-300">
+              <div className="grid h-full gap-1 p-2" style={{ gridTemplateColumns: `repeat(${visibleCols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${visibleRows}, minmax(0, 1fr))` }}>
+                {Array.from({ length: shown }).map((_, index) => (
+                  <div key={`sheet-piece-${index}`} className="bg-blue-100 border border-[#004ccd]/55 rounded-sm flex items-center justify-center text-[8px] font-mono font-black text-[#004ccd]">
+                    P
+                  </div>
+                ))}
+              </div>
+              <div className="absolute right-2 bottom-2 bg-amber-100 border border-amber-300 px-2 py-1 rounded text-[9px] font-black text-amber-800">
+                scrap/offcut area
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+              <div className="text-[10px] uppercase font-black text-slate-500">Stock sheet</div>
+              <div className="font-mono font-black">{parsed.stockLength} x {parsed.stockWidth} mm</div>
+            </div>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+              <div className="text-[10px] uppercase font-black text-slate-500">Part cut size</div>
+              <div className="font-mono font-black">{parsed.pieceLength || '-'} x {parsed.pieceWidth || '-'} mm</div>
+            </div>
+            <div className="p-3 bg-blue-50 border border-blue-100 rounded">
+              <div className="text-[10px] uppercase font-black text-[#004ccd]">Grid yield</div>
+              <div className="font-mono font-black">{cols} x {rows} = {parsed.pieces} parts</div>
+            </div>
+            <div className="p-3 bg-amber-50 border border-amber-100 rounded">
+              <div className="text-[10px] uppercase font-black text-amber-700">Allocated scrap</div>
+              <div className="font-mono font-black">{Number(item.scrapWeightKg || 0).toFixed(3)} kg</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const stock = parsed.stockLength || 6000;
+    const used = Math.min((parsed.pieceLength || 0) * parsed.pieces, stock);
+    const usedPercent = Math.max(Math.min((used / stock) * 100, 100), 0);
+    const leftoverPercent = Math.max(100 - usedPercent, 0);
+    return (
+      <div className="space-y-4">
+        <div className="relative h-28 bg-slate-100 border border-slate-200 rounded-lg p-5">
+          <div className="relative h-12 bg-slate-300 border-2 border-slate-900 rounded-full overflow-hidden shadow-inner">
+            <div className="absolute inset-y-0 left-0 bg-blue-100 flex" style={{ width: `${usedPercent}%` }}>
+              {Array.from({ length: Math.min(parsed.pieces, 8) }).map((_, index) => (
+                <div key={`rod-piece-${index}`} className="h-full border-r-2 border-[#004ccd] flex-1 flex items-center justify-center text-[10px] font-black text-[#004ccd]">
+                  {index + 1}
+                </div>
+              ))}
+            </div>
+            {leftoverPercent > 0 && (
+              <div className="absolute inset-y-0 right-0 bg-amber-200 flex items-center justify-center text-[10px] font-black text-amber-900" style={{ width: `${leftoverPercent}%` }}>
+                scrap
+              </div>
+            )}
+          </div>
+          <div className="absolute left-5 right-5 bottom-3 flex justify-between text-[10px] font-mono text-slate-600">
+            <span>0 mm</span>
+            <span>stock length {stock} mm</span>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+            <div className="text-[10px] uppercase font-black text-slate-500">Stock rod/profile</div>
+            <div className="font-mono font-black">{stock} mm</div>
+          </div>
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+            <div className="text-[10px] uppercase font-black text-slate-500">Part length</div>
+            <div className="font-mono font-black">{parsed.pieceLength || '-'} mm</div>
+          </div>
+          <div className="p-3 bg-blue-50 border border-blue-100 rounded">
+            <div className="text-[10px] uppercase font-black text-[#004ccd]">Yield per stock</div>
+            <div className="font-mono font-black">{parsed.pieces} pieces</div>
+          </div>
+          <div className="p-3 bg-amber-50 border border-amber-100 rounded">
+            <div className="text-[10px] uppercase font-black text-amber-700">Leftover</div>
+            <div className="font-mono font-black">{parsed.leftover} mm</div>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   const hasPartImageRegion = (part: StructuredBreakdown['per_part_breakdown'][number]) => {
@@ -1009,10 +1541,20 @@ export default function App() {
     if (!hasPartImageRegion(part) || !region) {
       return {};
     }
-    const xMin = Number(region.x_min);
-    const yMin = Number(region.y_min);
-    const width = Number(region.x_max) - xMin;
-    const height = Number(region.y_max) - yMin;
+    const rawXMin = Number(region.x_min);
+    const rawYMin = Number(region.y_min);
+    const rawXMax = Number(region.x_max);
+    const rawYMax = Number(region.y_max);
+    const rawWidth = rawXMax - rawXMin;
+    const rawHeight = rawYMax - rawYMin;
+    const paddingX = Math.max(rawWidth * 0.22, 28);
+    const paddingY = Math.max(rawHeight * 0.22, 28);
+    const xMin = Math.max(rawXMin - paddingX, 0);
+    const yMin = Math.max(rawYMin - paddingY, 0);
+    const xMax = Math.min(rawXMax + paddingX, 1000);
+    const yMax = Math.min(rawYMax + paddingY, 1000);
+    const width = Math.max(xMax - xMin, 1);
+    const height = Math.max(yMax - yMin, 1);
     return {
       position: 'absolute',
       width: `${100000 / width}%`,
@@ -1035,6 +1577,72 @@ export default function App() {
 
   const partImageRegionLabel = (part: StructuredBreakdown['per_part_breakdown'][number]) =>
     hasPartImageRegion(part) ? (part.image_region?.source || 'Detected part region') : 'Part crop not available';
+
+  const partReferenceImageUrl = (part?: StructuredBreakdown['per_part_breakdown'][number] | null) => {
+    const svgToDataUri = (svg: string) => `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+    const dims = part?.dimensions || {};
+    const length = Number(dims.length_mm || 0);
+    const width = Number(dims.width_or_outer_dia_mm || 0);
+    const secondary = Number(dims.secondary_width_mm || 0);
+    const thickness = Number(dims.thickness_or_wall_thickness_mm || 0);
+    const qty = Number(part?.per_set_qty || 1);
+    const title = (part?.component_name || part?.tube_type || part?.component_type || 'Part reference').toUpperCase();
+    const dimensionLine = structuredDimensions(part as StructuredBreakdown['per_part_breakdown'][number] || ({} as StructuredBreakdown['per_part_breakdown'][number]));
+    const text = part
+      ? `${part.part_number || ''} ${part.component_name || ''} ${part.component_type || ''} ${part.tube_type || ''}`.toLowerCase()
+      : '';
+    const escapedTitle = title.replace(/[<>&"]/g, '');
+    const escapedDims = dimensionLine.replace(/[<>&"]/g, '');
+    const frameOpen = (sectionTitle = escapedTitle) => `<svg width="900" height="620" viewBox="0 0 900 620" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="studio" cx="50%" cy="36%" r="78%"><stop stop-color="#f7f5ee"/><stop offset=".58" stop-color="#b8b3aa"/><stop offset="1" stop-color="#8e887d"/></radialGradient>
+        <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f8f7f2"/><stop offset=".16" stop-color="#cbc6bc"/><stop offset=".45" stop-color="#817d75"/><stop offset=".72" stop-color="#d8d4cc"/><stop offset="1" stop-color="#ffffff"/></linearGradient>
+        <linearGradient id="darkSteel" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#6d6961"/><stop offset=".45" stop-color="#aaa59b"/><stop offset="1" stop-color="#ebe8df"/></linearGradient>
+        <linearGradient id="side" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#6f6a62"/><stop offset=".55" stop-color="#9d988f"/><stop offset="1" stop-color="#d9d5cc"/></linearGradient>
+        <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#45423d"/><stop offset=".5" stop-color="#98938a"/><stop offset="1" stop-color="#eeeae2"/></linearGradient>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1f2937"/></marker>
+        <filter id="shadow" x="-25%" y="-25%" width="150%" height="170%"><feDropShadow dx="0" dy="22" stdDeviation="17" flood-color="#000" flood-opacity=".32"/></filter>
+        <filter id="soft" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="0.35"/></filter>
+      </defs>
+      <rect width="900" height="620" rx="26" fill="url(#studio)"/>
+      <rect x="0" y="0" width="900" height="58" fill="#050505"/>
+      <text x="24" y="37" fill="#f9fafb" font-family="Arial, sans-serif" font-size="23" font-weight="800">${sectionTitle}</text>
+      <text x="24" y="586" fill="#111827" font-family="Arial, sans-serif" font-size="18" font-weight="800">${escapedDims || 'DIMENSIONS FROM DRAWING'}</text>
+      <text x="790" y="586" fill="#111827" font-family="Arial, sans-serif" font-size="16" font-weight="800">QTY ${qty}</text>
+      <ellipse cx="450" cy="512" rx="320" ry="48" fill="#5f584d" opacity=".24" filter="url(#soft)"/>`;
+    const frameClose = `</svg>`;
+    const dimensionCallout = (x1: number, y1: number, x2: number, y2: number, label: string) =>
+      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#1f2937" stroke-width="2.4" marker-start="url(#arrow)" marker-end="url(#arrow)"/><rect x="${(x1 + x2) / 2 - 42}" y="${Math.min(y1, y2) - 28}" width="84" height="24" rx="4" fill="#efede6" stroke="#1f2937"/><text x="${(x1 + x2) / 2}" y="${Math.min(y1, y2) - 11}" text-anchor="middle" fill="#111827" font-family="Arial, sans-serif" font-size="14" font-weight="800">${label}</text>`;
+    const hole = (cx: number, cy: number, r = 17) =>
+      `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#f7f5ee" stroke="#6a655d" stroke-width="5"/><circle cx="${cx}" cy="${cy}" r="${Math.max(r - 8, 5)}" fill="#c4beb3"/>`;
+    const genericShape = `<g filter="url(#shadow)"><polygon points="270,214 560,142 690,224 400,304" fill="url(#steel)" stroke="#716d65" stroke-width="5"/><polygon points="400,304 690,224 690,382 400,468" fill="#969289" stroke="#625f58" stroke-width="5"/><polygon points="270,214 400,304 400,468 270,376" fill="#bbb7ae" stroke="#69655e" stroke-width="5"/></g>`;
+
+    if (!part) return svgToDataUri(`${frameOpen('PART REFERENCE')}${genericShape}${frameClose}`);
+    if (text.includes('screw')) return svgToDataUri(`${frameOpen('ITEM: SCREWING PIECE')}<g filter="url(#shadow)"><ellipse cx="450" cy="168" rx="108" ry="44" fill="#bcb7ad" stroke="#625e57" stroke-width="5"/><rect x="342" y="168" width="216" height="248" fill="url(#steel)" stroke="#625e57" stroke-width="5"/><ellipse cx="450" cy="416" rx="108" ry="44" fill="#8c877e" stroke="#625e57" stroke-width="5"/><ellipse cx="450" cy="168" rx="46" ry="18" fill="#f8f5ee" stroke="#625e57" stroke-width="5"/><path d="M360 226 H540 M360 278 H540 M360 330 H540 M360 382 H540" stroke="#6b665f" stroke-width="4"/></g>${dimensionCallout(338, 464, 562, 464, length ? `${length} mm` : 'L')}${dimensionCallout(610, 168, 610, 416, width ? `Dia ${width}` : 'Dia')}${frameClose}`);
+    if (text.includes('handle')) return svgToDataUri(`${frameOpen('SUB-COMPONENT: HANDLE')}<g filter="url(#shadow)"><path d="M330 198 C238 198 238 430 330 430 L570 430 C662 430 662 198 570 198" stroke="#5f5a53" stroke-width="66" stroke-linecap="round" fill="none"/><path d="M330 198 C238 198 238 430 330 430 L570 430 C662 430 662 198 570 198" stroke="#d8d4cc" stroke-width="40" stroke-linecap="round" fill="none"/><path d="M330 198 C238 198 238 430 330 430 L570 430 C662 430 662 198 570 198" stroke="#9b968d" stroke-width="12" stroke-linecap="round" fill="none" opacity=".78"/><path d="M332 183 C236 190 220 425 326 445" stroke="#fff" stroke-width="8" opacity=".22"/></g>${dimensionCallout(302, 148, 598, 148, length ? `${length} mm` : 'L')}${dimensionCallout(676, 202, 676, 430, width ? `OD ${width}` : 'OD')}${frameClose}`);
+    if (text.includes('chair') || text.includes('angle') || text.includes('bracket')) return svgToDataUri(`${frameOpen('SUB-COMPONENT: CHAIR ANGLE')}<g filter="url(#shadow)"><polygon points="288,406 596,286 720,358 410,486" fill="url(#steel)" stroke="#645f58" stroke-width="5"/><polygon points="410,486 720,358 720,444 410,566" fill="url(#side)" stroke="#545049" stroke-width="5"/><polygon points="596,286 720,358 720,206 596,140" fill="#b9b4aa" stroke="#645f58" stroke-width="5"/><polygon points="596,140 720,206 410,330 288,260" fill="url(#steel)" stroke="#645f58" stroke-width="5"/><path d="M618 158 L694 202 L694 337" stroke="#fff" stroke-width="8" opacity=".22"/>${hole(430,424,15)}${hole(586,360,15)}</g>${dimensionCallout(288,520,720,520, length ? `${length} mm` : 'L')}${dimensionCallout(755,206,755,444, secondary || width ? `${secondary || width} mm` : 'H')}${frameClose}`);
+    if (text.includes('plate') || text.includes('sheet') || text.includes('top') || text.includes('bottom')) {
+      const plateW = Math.min(Math.max(width || secondary || 125, 80), 220);
+      const plateH = Math.min(Math.max(length || 150, 90), 260);
+      const x = 450 - plateW * 1.02;
+      const y = 182;
+      const skew = 92;
+      const edgeDepth = Math.max(Math.min(thickness * 4, 24), 10);
+      return svgToDataUri(`${frameOpen(text.includes('top') ? 'ITEM: TOP PLATE DETAIL' : text.includes('bottom') ? 'ITEM: BOTTOM PLATE DETAIL' : 'ITEM: PLATE DETAIL')}
+        <g filter="url(#shadow)">
+          <polygon points="${x},${y} ${x + plateW * 1.85},${y - skew * .42} ${x + plateW * 2.55},${y + skew * .2} ${x + plateW * .68},${y + skew * .72}" fill="url(#steel)" stroke="#6d6961" stroke-width="4"/>
+          <polygon points="${x + plateW * .68},${y + skew * .72} ${x + plateW * 2.55},${y + skew * .2} ${x + plateW * 2.55},${y + skew * .2 + edgeDepth} ${x + plateW * .68},${y + skew * .72 + edgeDepth}" fill="url(#edge)" stroke="#5c5851" stroke-width="4"/>
+          <polygon points="${x},${y} ${x + plateW * .68},${y + skew * .72} ${x + plateW * .68},${y + skew * .72 + edgeDepth} ${x},${y + edgeDepth}" fill="#8f8a81" stroke="#5c5851" stroke-width="4"/>
+          <path d="M ${x + 34} ${y + 10} L ${x + plateW * 1.72} ${y - skew * .32}" stroke="white" stroke-width="8" opacity=".22"/>
+          ${hole(x + plateW * .48, y + 42, 17)}
+          ${hole(x + plateW * 1.78, y + 2, 17)}
+          ${hole(x + plateW * .56, y + plateH * .58, 17)}
+          ${hole(x + plateW * 1.84, y + plateH * .18, 17)}
+        </g>${dimensionCallout(x + 6, y + 186, x + plateW * 2.34, y + 136, length ? `${length} mm` : 'L')}${dimensionCallout(x + plateW * 2.68, y + 18, x + plateW * 2.68, y + 160, width ? `${width} mm` : 'W')}${dimensionCallout(x + plateW * .78, y + skew * .8 + edgeDepth + 20, x + plateW * 2.5, y + skew * .28 + edgeDepth + 20, thickness ? `t ${thickness}` : 't')}${frameClose}`);
+    }
+    if (text.includes('tube') || text.includes('square') || text.includes('pipe')) return svgToDataUri(`${frameOpen('ITEM: SQUARE TUBE SUB-ASSEMBLY')}<g filter="url(#shadow)"><polygon points="134,348 602,124 780,204 312,438" fill="url(#steel)" stroke="#5f5a53" stroke-width="5"/><polygon points="312,438 780,204 780,294 312,528" fill="url(#side)" stroke="#4f4b45" stroke-width="5"/><polygon points="134,348 312,438 312,528 134,436" fill="#706b63" stroke="#4f4b45" stroke-width="5"/><rect x="174" y="374" width="92" height="92" fill="#171b1b" stroke="#f2eee5" stroke-width="7"/><rect x="194" y="394" width="52" height="52" fill="#282d2d" stroke="#514d46" stroke-width="4"/><path d="M220 330 L638 132" stroke="#fff" stroke-width="10" opacity=".2"/>${hole(474,262,24)}${hole(592,206,24)}${hole(390,304,24)}<path d="M474 262 C490 250 514 246 528 254" stroke="#2f2c28" stroke-width="4" opacity=".5"/></g>${dimensionCallout(164,548,760,548, length ? `${length} mm` : 'L')}${dimensionCallout(106,350,106,436, width ? `${width} mm` : 'A')}${dimensionCallout(102,382,174,382, thickness ? `t ${thickness}` : 't')}${frameClose}`);
+    return svgToDataUri(`${frameOpen()}${genericShape}${frameClose}`);
+  };
 
   const renderPartRegionAnnotations = (compact = false) => {
     const parts = estimation?.structuredBreakdown?.per_part_breakdown || structuredBreakdownCache?.per_part_breakdown || [];
@@ -1075,11 +1683,56 @@ export default function App() {
     ), 0)
     : null;
 
-  const displayedScrapRate = Number(params.scrapRate || estimation?.stockSummary?.scrapRatePerKg || 0);
+  const displayedScrapRate = Number(params.scrapRate || estimation?.stockSummary?.scrapRatePerKg || 28);
   const displayedScrapWeightKg = structuredScrapWeightKg ?? Number(estimation?.stockSummary?.totalScrapWeightKg || 0);
   const displayedScrapValue = displayedScrapWeightKg * displayedScrapRate;
 
   const valueButtonClass = "font-mono underline decoration-dotted underline-offset-4 hover:text-[#004ccd] focus:text-[#004ccd] cursor-pointer";
+  const cleanBreakdownText = (value: string) =>
+    String(value || '-')
+      .replace(/\bINR\b/g, 'Rs')
+      .replace(/kg\/mm3/g, 'kg per mm3')
+      .replace(/mm2/g, 'mm squared')
+      .replace(/mm3/g, 'mm cubed')
+      .replace(/m2/g, 'm squared');
+
+  const simpleBreakdownMeaning = (step: CalculationStep) => {
+    const text = `${step.section} ${step.name} ${step.formula}`.toLowerCase();
+    if (text.includes('scrap') && text.includes('resale')) {
+      return 'This is the money recovered from leftover material. More scrap rate increases recovered value and reduces net material cost.';
+    }
+    if (text.includes('scrap') || text.includes('offcut')) {
+      return 'This shows how much leftover material is allocated to this part or assembly.';
+    }
+    if (text.includes('material cost')) {
+      return 'This is the material amount charged for the part after considering weight and scrap recovery.';
+    }
+    if (text.includes('gross rm') || text.includes('gross raw')) {
+      return 'This is the raw material weight before removing waste or scrap.';
+    }
+    if (text.includes('net weight') || text.includes('finished weight')) {
+      return 'This is the final usable part weight calculated from size, section area, length, and material density.';
+    }
+    if (text.includes('surface')) {
+      return 'This is the painted or finished surface area/cost. The drawing dimensions are in mm, so area is converted to square meters.';
+    }
+    if (text.includes('laser')) {
+      return 'This is laser cutting cost: cutting length is converted to meters and multiplied by the laser rate.';
+    }
+    if (text.includes('press') || text.includes('punch')) {
+      return 'This is press/punch cost: number of hits multiplied by the rate per hit.';
+    }
+    if (text.includes('bend')) {
+      return 'This is bending cost: number of bends multiplied by rate per bend.';
+    }
+    if (text.includes('weld')) {
+      return 'This is welding cost: weld length is converted to meters and multiplied by welding rate.';
+    }
+    if (text.includes('total')) {
+      return 'This is the final total from the related material and process cost lines.';
+    }
+    return 'This shows the simple formula and the values used to calculate this number.';
+  };
 
   return (
     <div className="flex flex-col min-h-screen bg-[#f9f9f9] text-[#1a1c1c] font-sans antialiased">
@@ -1112,14 +1765,296 @@ export default function App() {
             </div>
             <div className="p-5 overflow-y-auto custom-scrollbar space-y-3">
               {selectedBreakdown.steps.map((step, idx) => (
-                <div key={`${step.name}-${idx}`} className="p-4 bg-slate-50 rounded border border-slate-200 space-y-2">
-                  <div className="text-[10px] uppercase font-bold text-slate-400">{step.section}</div>
-                  <div className="text-sm font-bold text-slate-800">{step.name}</div>
-                  <div className="font-mono text-xs text-slate-700">{step.formula}</div>
-                  <div className="font-mono text-xs text-slate-500">{step.substitutedValues}</div>
-                  <div className="font-mono text-sm font-black text-[#00796b]">{step.result}</div>
+                <div key={`${step.name}-${idx}`} className="p-4 bg-white rounded-lg border border-slate-200 shadow-sm space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase font-bold text-[#004ccd] tracking-wider">{step.section}</div>
+                      <div className="text-sm font-black text-slate-900">{step.name}</div>
+                    </div>
+                    <div className="px-2 py-1 rounded bg-emerald-50 text-emerald-800 text-xs font-mono font-black whitespace-nowrap">
+                      {cleanBreakdownText(step.result)}
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-blue-50/60 border border-blue-100 rounded-md">
+                    <div className="text-[10px] uppercase font-black text-[#004ccd] mb-1">Simple meaning</div>
+                    <div className="text-xs text-slate-700 leading-relaxed">{simpleBreakdownMeaning(step)}</div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      className="p-3 bg-slate-50 rounded border border-slate-100 text-left hover:border-[#004ccd] hover:bg-blue-50/50 transition-colors"
+                      onClick={() => setSelectedBreakdown({
+                        title: `Formula Source: ${step.name}`,
+                        steps: valueSourceBreakdownSteps(step),
+                      })}
+                    >
+                      <div className="text-[10px] uppercase font-black text-slate-500 mb-1">Formula</div>
+                      <div className="font-mono text-xs text-slate-800 leading-relaxed">{cleanBreakdownText(step.formula)}</div>
+                      <div className="text-[9px] uppercase font-bold text-[#004ccd] mt-2">Click for source</div>
+                    </button>
+                    <button
+                      type="button"
+                      className="p-3 bg-slate-50 rounded border border-slate-100 text-left hover:border-[#004ccd] hover:bg-blue-50/50 transition-colors"
+                      onClick={() => setSelectedBreakdown({
+                        title: `Values Used: ${step.name}`,
+                        steps: valueSourceBreakdownSteps(step),
+                      })}
+                    >
+                      <div className="text-[10px] uppercase font-black text-slate-500 mb-1">Values used</div>
+                      <div className="font-mono text-xs text-slate-800 leading-relaxed">{cleanBreakdownText(step.substitutedValues)}</div>
+                      <div className="text-[9px] uppercase font-bold text-[#004ccd] mt-2">Click for source</div>
+                    </button>
+                  </div>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedPartDetails && (
+        <div className="fixed inset-0 z-[125] bg-slate-950/55 flex items-center justify-center p-4" onClick={() => setSelectedPartDetails(null)}>
+          <div
+            className="w-full max-w-xl bg-white border border-[#c3c6d8] rounded-xl shadow-2xl overflow-hidden"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-5 py-4 bg-slate-950 text-white flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-widest font-bold text-cyan-200">Part Details</div>
+                <h3 className="text-base font-black truncate">
+                  Part {selectedPartDetails.part_number}: {selectedPartDetails.component_name || selectedPartDetails.tube_type || selectedPartDetails.component_type}
+                </h3>
+              </div>
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded bg-white/10 text-white text-xs font-bold hover:bg-white/15"
+                onClick={() => setSelectedPartDetails(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-5 space-y-5">
+              <div>
+                <div className="text-[10px] uppercase tracking-widest font-black text-[#004ccd] mb-2">Dimensions</div>
+                <div className="grid grid-cols-2 gap-3">
+                  {partDimensionBadges(selectedPartDetails).map((badge) => (
+                    <div key={`${badge.label}-${badge.value}`} className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                      <div className="text-[10px] uppercase font-black text-slate-500">{badge.label}</div>
+                      <div className="font-mono text-sm font-black text-slate-900 mt-1">{badge.value}</div>
+                    </div>
+                  ))}
+                  {partDimensionBadges(selectedPartDetails).length === 0 && (
+                    <div className="col-span-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
+                      No verified dimensions were extracted for this part.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[10px] uppercase tracking-widest font-black text-[#004ccd] mb-2">Weight Breakdown</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-lg">
+                    <div className="text-[10px] uppercase font-black text-emerald-700">Net weight</div>
+                    <div className="font-mono text-sm font-black text-emerald-950 mt-1">
+                      {Number(selectedPartDetails.weight_ledger?.unit_net_finished_weight_kg || 0).toFixed(3)} kg
+                    </div>
+                  </div>
+                  <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg">
+                    <div className="text-[10px] uppercase font-black text-amber-700">Scrap weight</div>
+                    <div className="font-mono text-sm font-black text-amber-950 mt-1">
+                      {Number(selectedPartDetails.weight_ledger?.unit_scrap_waste_weight_kg || 0).toFixed(3)} kg
+                    </div>
+                  </div>
+                  <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg">
+                    <div className="text-[10px] uppercase font-black text-[#004ccd]">Net + scrap</div>
+                    <div className="font-mono text-sm font-black text-[#004ccd] mt-1">
+                      {partTotalWeightKg(selectedPartDetails).toFixed(3)} kg
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 p-3 bg-slate-50 border border-slate-200 rounded-lg font-mono text-xs text-slate-700">
+                  Total weight = net finished weight + scrap weight = {Number(selectedPartDetails.weight_ledger?.unit_net_finished_weight_kg || 0).toFixed(3)} kg + {Number(selectedPartDetails.weight_ledger?.unit_scrap_waste_weight_kg || 0).toFixed(3)} kg = {partTotalWeightKg(selectedPartDetails).toFixed(3)} kg
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedNestingItem && (
+        <div className="fixed inset-0 z-[126] bg-slate-950/60 flex items-center justify-center p-4" onClick={() => setSelectedNestingItem(null)}>
+          <div
+            className="w-full max-w-4xl bg-white border border-[#c3c6d8] rounded-xl shadow-2xl overflow-hidden"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-5 py-4 bg-slate-950 text-white flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-widest font-bold text-cyan-200">Nesting / Stock Cutting Visual</div>
+                <h3 className="text-base font-black truncate">{selectedNestingItem.name}</h3>
+              </div>
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded bg-white/10 text-white text-xs font-bold hover:bg-white/15"
+                onClick={() => setSelectedNestingItem(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-5 space-y-5">
+              {renderNestingVisual(selectedNestingItem)}
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg">
+                <div className="text-[10px] uppercase font-black tracking-widest text-slate-500 mb-2">Calculation approach</div>
+                <div className="text-sm leading-relaxed text-slate-700">{selectedNestingItem.nestingApproach}</div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                <div className="p-3 bg-white border border-slate-200 rounded">
+                  <div className="text-[10px] uppercase font-black text-slate-500">Part qty</div>
+                  <div className="font-mono font-black">{selectedNestingItem.quantity} pcs</div>
+                </div>
+                <button
+                  type="button"
+                  className="p-3 bg-white border border-slate-200 hover:border-[#004ccd] hover:bg-blue-50/40 rounded text-left transition-colors"
+                  onClick={() => openBreakdown(`${selectedNestingItem.name} Part Weight`, nestingValueBreakdownSteps(selectedNestingItem, 'weight'))}
+                >
+                  <div className="text-[10px] uppercase font-black text-slate-500">Part weight</div>
+                  <div className="font-mono font-black underline decoration-dotted underline-offset-4">{Number(selectedNestingItem.weightKg || 0).toFixed(3)} kg</div>
+                </button>
+                <button
+                  type="button"
+                  className="p-3 bg-white border border-slate-200 hover:border-[#004ccd] hover:bg-blue-50/40 rounded text-left transition-colors"
+                  onClick={() => openBreakdown(`${selectedNestingItem.name} Scrap Weight`, nestingValueBreakdownSteps(selectedNestingItem, 'scrapWeight'))}
+                >
+                  <div className="text-[10px] uppercase font-black text-slate-500">Scrap weight</div>
+                  <div className="font-mono font-black underline decoration-dotted underline-offset-4">{Number(selectedNestingItem.scrapWeightKg || 0).toFixed(3)} kg</div>
+                </button>
+                <button
+                  type="button"
+                  className="p-3 bg-white border border-slate-200 hover:border-[#004ccd] hover:bg-blue-50/40 rounded text-left transition-colors"
+                  onClick={() => openBreakdown(`${selectedNestingItem.name} Scrap Value`, nestingValueBreakdownSteps(selectedNestingItem, 'scrapValue'))}
+                >
+                  <div className="text-[10px] uppercase font-black text-slate-500">Scrap value</div>
+                  <div className="font-mono font-black underline decoration-dotted underline-offset-4">{formatInr(selectedNestingItem.scrapValue || 0)}</div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isPartSummaryOpen && estimation && (
+        <div className="fixed inset-0 z-[126] bg-slate-950/60 flex items-center justify-center p-4" onClick={() => setIsPartSummaryOpen(false)}>
+          <div
+            className="w-full max-w-5xl max-h-[88vh] bg-white border border-[#c3c6d8] rounded-xl shadow-2xl overflow-hidden flex flex-col"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-5 py-4 bg-slate-950 text-white flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-widest font-bold text-cyan-200">Part Summary</div>
+                <h3 className="text-base font-black truncate">{fileName || estimation.uploadedFile || 'Uploaded drawing'}</h3>
+              </div>
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded bg-white/10 text-white text-xs font-bold hover:bg-white/15"
+                onClick={() => setIsPartSummaryOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto custom-scrollbar space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                  <div className="text-[10px] uppercase font-black text-slate-500">File name</div>
+                  <div className="font-mono text-sm font-black text-slate-900 mt-1">{fileName || estimation.uploadedFile || '-'}</div>
+                </div>
+                <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg">
+                  <div className="text-[10px] uppercase font-black text-[#004ccd]">Part made</div>
+                  <div className="font-mono text-sm font-black text-[#004ccd] mt-1">{params.partName || estimation.structuredBreakdown?.part_name || '-'}</div>
+                </div>
+                <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-lg">
+                  <div className="text-[10px] uppercase font-black text-emerald-700">Total cost</div>
+                  <div className="font-mono text-sm font-black text-emerald-950 mt-1">{formatInr(estimation.summary.totalCost)}</div>
+                </div>
+              </div>
+
+              {estimation.structuredBreakdown?.per_part_breakdown?.length ? (
+                <div className="space-y-3">
+                  <div className="text-[10px] uppercase tracking-widest font-black text-[#004ccd]">Part-wise extracted details</div>
+                  {estimation.structuredBreakdown.per_part_breakdown.map((part) => (
+                    <div key={`summary-structured-${part.part_number}`} className="p-4 border border-slate-200 rounded-lg bg-slate-50">
+                      <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                        <div>
+                          <div className="text-[10px] uppercase font-black text-slate-500">Part {part.part_number}</div>
+                          <div className="text-sm font-black text-slate-950">{part.component_name || part.tube_type || part.component_type}</div>
+                          <div className="text-xs font-mono text-slate-600 mt-1">{part.component_type} / Qty {part.per_set_qty}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-[10px] uppercase font-black text-[#004ccd]">Set laser cost</div>
+                          <button type="button" className="font-mono text-sm font-black text-[#004ccd] underline decoration-dotted underline-offset-4" onClick={() => openBreakdown(`Part ${part.part_number} Cost`, mapStructuredSteps(part.calculation_steps))}>
+                            {formatInr(part.calculated_costs.total_combined_set_cost_via_laser)}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3">
+                        {partDimensionBadges(part).map((badge) => (
+                          <div key={`summary-${part.part_number}-${badge.label}`} className="p-2 bg-white border border-slate-200 rounded">
+                            <div className="text-[9px] uppercase font-black text-slate-500">{badge.label}</div>
+                            <div className="font-mono text-xs font-black">{badge.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-3">
+                        <button type="button" className="p-2 bg-white border border-slate-200 hover:border-[#004ccd] rounded text-left" onClick={() => openBreakdown(`Part ${part.part_number} Weight Formula`, structuredStepsFor(part, ['net weight', 'gross rm weight']))}>
+                          <div className="text-[9px] uppercase font-black text-slate-500">Weight formula</div>
+                          <div className="text-xs text-slate-700">View weight calculation</div>
+                        </button>
+                        <button type="button" className="p-2 bg-white border border-slate-200 hover:border-[#004ccd] rounded text-left" onClick={() => openBreakdown(`Part ${part.part_number} Cost Formula`, structuredStepsFor(part, ['material cost', 'total via laser']))}>
+                          <div className="text-[9px] uppercase font-black text-slate-500">Cost formula</div>
+                          <div className="text-xs text-slate-700">View material and route cost</div>
+                        </button>
+                        <button type="button" className="p-2 bg-white border border-slate-200 hover:border-[#004ccd] rounded text-left" onClick={() => openBreakdown(`Part ${part.part_number} Process Formula`, structuredStepsFor(part, ['laser cutting', 'press cutting', 'bending', 'painting']))}>
+                          <div className="text-[9px] uppercase font-black text-slate-500">Process formula</div>
+                          <div className="text-xs text-slate-700">View cutting, bending, finish</div>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="text-[10px] uppercase tracking-widest font-black text-[#004ccd]">Part-wise calculated details</div>
+                  {estimation.items?.map((item, index) => (
+                    <div key={`summary-item-${item.name}-${index}`} className="p-4 border border-slate-200 rounded-lg bg-slate-50">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-[10px] uppercase font-black text-slate-500">Part {index + 1}</div>
+                          <div className="text-sm font-black text-slate-950">{item.name}</div>
+                          <div className="text-xs font-mono text-slate-600 mt-1">Qty {item.quantity} / {item.stockForm || '-'}</div>
+                        </div>
+                        <button type="button" className="font-mono text-sm font-black text-[#004ccd] underline decoration-dotted underline-offset-4" onClick={() => openBreakdown(`${item.name} Cost Formula`, [item.formulas?.material])}>
+                          {formatInr(item.materialCost)}
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-3">
+                        <button type="button" className="p-2 bg-white border border-slate-200 hover:border-[#004ccd] rounded text-left" onClick={() => openBreakdown(`${item.name} Weight Formula`, [item.formulas?.weight])}>
+                          <div className="text-[9px] uppercase font-black text-slate-500">Weight</div>
+                          <div className="font-mono text-xs font-black">{Number(item.weightKg || 0).toFixed(3)} kg</div>
+                        </button>
+                        <button type="button" className="p-2 bg-white border border-slate-200 hover:border-[#004ccd] rounded text-left" onClick={() => openBreakdown(`${item.name} Material Formula`, [item.formulas?.material])}>
+                          <div className="text-[9px] uppercase font-black text-slate-500">Material cost</div>
+                          <div className="font-mono text-xs font-black">{formatInr(item.materialCost)}</div>
+                        </button>
+                        <button type="button" className="p-2 bg-white border border-slate-200 hover:border-[#004ccd] rounded text-left" onClick={() => setSelectedNestingItem(item)}>
+                          <div className="text-[9px] uppercase font-black text-slate-500">Nesting</div>
+                          <div className="text-xs text-slate-700">View stock cutting visual</div>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1269,9 +2204,149 @@ export default function App() {
                 ref={fileInputRef}
                 type="file" 
                 accept=".tif,.tiff,.png,.jpg,.jpeg,.pdf,.dwg"
+                multiple
                 className="hidden"
                 onChange={handleFileInput}
               />
+
+              {batchUploadFiles.length > 0 && (
+                <div className="mt-8 w-full max-w-6xl text-left bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-4">
+                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                    <div>
+                      <div className="text-[10px] uppercase font-black tracking-widest text-[#004ccd]">Uploaded file batch</div>
+                      <div className="text-xs text-slate-600 mt-1">Each uploaded file is listed vertically. Child/detail files for that row are shown horizontally.</div>
+                    </div>
+                    <span className="text-[10px] uppercase font-black text-slate-500">{batchUploadFiles.length} files staged</span>
+                  </div>
+
+                  <div className="space-y-3 max-h-[430px] overflow-y-auto pr-1 custom-scrollbar">
+                    <div className="grid grid-cols-[240px_1fr] gap-3 px-1 text-[10px] uppercase font-black text-slate-500">
+                      <div>Main / parent file</div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span>Child / dependency files for that parent</span>
+                        <label className="cursor-pointer px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-300 rounded text-[10px] uppercase font-black text-slate-700">
+                          Add child files
+                          <input
+                            type="file"
+                            multiple
+                            accept=".tif,.tiff,.png,.jpg,.jpeg,.pdf,.dwg"
+                            className="hidden"
+                            onChange={(event) => {
+                              void appendChildFilesToBatch(Array.from(event.target.files || []));
+                              event.target.value = '';
+                            }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+
+                    {batchUploadFiles.map((file) => {
+                      const isSelectedParent = selectedBatchParentName === file.name;
+                      const expectedChildren = expectedChildFileHints(file.name);
+                      const uploadedExpectedChildren = expectedChildren
+                        .map(hint => batchUploadFiles.find(child => child.name !== file.name && fileMatchesHint(child, hint)))
+                        .filter(Boolean) as BatchUploadFile[];
+                      const missingExpectedChildren = expectedChildren.filter(hint => (
+                        !batchUploadFiles.some(child => child.name !== file.name && fileMatchesHint(child, hint))
+                      ));
+                      const rowChildren = uploadedExpectedChildren;
+                      return (
+                        <div
+                          key={`batch-row-${file.name}`}
+                          className={`grid grid-cols-1 md:grid-cols-[240px_1fr] gap-3 p-3 rounded-lg border transition-colors ${
+                            isSelectedParent ? 'bg-blue-50/70 border-[#004ccd]' : 'bg-white border-slate-200'
+                          }`}
+                        >
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="radio"
+                              name="batch-parent-file"
+                              checked={isSelectedParent}
+                              onChange={() => setSelectedBatchParentName(file.name)}
+                            />
+                            <div className="min-w-0">
+                              <div className={`text-xs font-black truncate ${isSelectedParent ? 'text-[#004ccd]' : 'text-slate-900'}`}>{file.name}</div>
+                              <div className="text-[10px] font-mono text-slate-500">{file.sizeMb}</div>
+                              {isSelectedParent && (
+                                <div className="mt-1 text-[9px] uppercase font-black text-[#004ccd]">selected parent</div>
+                              )}
+                            </div>
+                          </label>
+
+                          <div className="min-w-0">
+                            <div className="flex gap-3 overflow-x-auto pb-2">
+                              {missingExpectedChildren.map((hint) => (
+                                <label
+                                  key={`missing-child-${file.name}-${hint}`}
+                                  className={`min-w-[250px] p-3 rounded-lg border-2 border-dashed cursor-pointer transition-colors ${
+                                    isSelectedParent
+                                      ? 'bg-red-50 border-red-300 hover:bg-red-100'
+                                      : 'bg-red-50/40 border-red-200 opacity-70'
+                                  }`}
+                                >
+                                  <div className="text-[9px] uppercase font-black text-red-700">Missing child file</div>
+                                  <div className="text-sm font-black text-red-900 truncate mt-1">{hint}</div>
+                                  <div className="text-[10px] text-red-700 mt-1">Click to upload this dependency</div>
+                                  <input
+                                    type="file"
+                                    accept=".tif,.tiff,.png,.jpg,.jpeg,.pdf,.dwg"
+                                    className="hidden"
+                                    onChange={(event) => {
+                                      void appendChildFilesToBatch(Array.from(event.target.files || []));
+                                      event.target.value = '';
+                                    }}
+                                  />
+                                </label>
+                              ))}
+                              {rowChildren.map((child) => (
+                                <div
+                                  key={`child-for-${file.name}-${child.name}`}
+                                  className={`min-w-[250px] p-3 rounded-lg border transition-colors ${
+                                    isSelectedParent
+                                      ? 'bg-emerald-50 border-emerald-300 shadow-sm'
+                                      : 'bg-slate-50 border-slate-200 opacity-60'
+                                  }`}
+                                >
+                                  <div className={`text-[9px] uppercase font-black ${isSelectedParent ? 'text-emerald-700' : 'text-slate-400'}`}>
+                                    {isSelectedParent ? 'Uploaded child' : 'Dependency uploaded'}
+                                  </div>
+                                  <div className="text-sm font-black text-slate-900 truncate mt-1">{child.name || 'Unnamed child file'}</div>
+                                  <div className="text-[10px] font-mono text-slate-500 mt-1">{child.sizeMb}</div>
+                                </div>
+                              ))}
+                              {rowChildren.length === 0 && missingExpectedChildren.length === 0 && (
+                                <div className="min-w-[250px] p-3 bg-white border border-dashed border-slate-300 rounded-lg text-xs text-slate-500">
+                                  No known child/detail dependency for this drawing.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-3 justify-end border-t border-slate-200 pt-4">
+                    <button
+                      type="button"
+                      className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 rounded text-xs font-black uppercase tracking-wider text-slate-700"
+                      onClick={() => {
+                        setBatchUploadFiles([]);
+                        setSelectedBatchParentName('');
+                      }}
+                    >
+                      Clear batch
+                    </button>
+                    <button
+                      type="button"
+                      className="px-5 py-2 bg-[#004ccd] hover:bg-[#0f62fe] text-white rounded text-xs font-black uppercase tracking-wider shadow"
+                      onClick={() => void proceedWithUploadedFiles()}
+                    >
+                      Proceed with uploaded files
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Secure note */}
               <div className="mt-8 flex items-center gap-1.5 text-slate-400 font-semibold text-[10px] uppercase tracking-widest">
@@ -1492,12 +2567,22 @@ export default function App() {
                         Extracting Drawing Parameters
                       </div>
                       <h2 className="text-2xl font-black text-white">Scanning uploaded engineering document</h2>
+                      {scanPreviewPhase === 'reference' && (
+                        <p className="text-sm text-cyan-100/80 font-medium">Clean uploaded drawing preview is ready. Extraction is still running in the background.</p>
+                      )}
                     </div>
 
                     <div className="h-[430px] flex items-center justify-center" style={{ perspective: '1100px' }}>
                       <div className="relative w-[90%] max-w-5xl h-[82%]" style={{ transformStyle: 'preserve-3d', animation: 'fullDocumentFloat 3s ease-in-out infinite' }}>
                         <div className="absolute inset-0 bg-white rounded border border-cyan-100 shadow-[0_30px_80px_rgba(34,211,238,0.24)] overflow-hidden">
-                          {filePreview ? (
+                          {scanPreviewPhase === 'reference' ? (
+                            <img
+                              src={filePreview || DEFAULT_IMAGE_URL}
+                              alt="Clean uploaded drawing preview while extraction continues"
+                              onLoad={handlePreviewImageLoad}
+                              className="w-full h-full object-contain opacity-100 bg-white"
+                            />
+                          ) : filePreview ? (
                             <img
                               src={filePreview}
                               alt="3D scanning preview of uploaded drawing"
@@ -1511,8 +2596,12 @@ export default function App() {
                               <span className="text-[10px] text-slate-400 normal-case">TIFF is being converted for browser preview</span>
                             </div>
                           )}
-                          <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-cyan-300/75 via-cyan-300/20 to-transparent" style={{ animation: 'fullDocumentScan 1.55s linear infinite' }}></div>
-                          <div className="absolute inset-x-0 top-0 h-0.5 bg-cyan-200 shadow-[0_0_24px_rgba(103,232,249,1)]" style={{ animation: 'fullDocumentScan 1.55s linear infinite' }}></div>
+                          {scanPreviewPhase === 'scan' && (
+                            <>
+                              <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-cyan-300/75 via-cyan-300/20 to-transparent" style={{ animation: 'fullDocumentScan 1.55s linear infinite' }}></div>
+                              <div className="absolute inset-x-0 top-0 h-0.5 bg-cyan-200 shadow-[0_0_24px_rgba(103,232,249,1)]" style={{ animation: 'fullDocumentScan 1.55s linear infinite' }}></div>
+                            </>
+                          )}
                         </div>
                         <div className="absolute -bottom-10 left-14 right-14 h-10 bg-cyan-300/20 blur-2xl rounded-full" style={{ animation: 'scanPulse 2s ease-in-out infinite' }}></div>
                       </div>
@@ -1521,7 +2610,7 @@ export default function App() {
                     <div className="flex items-center justify-center gap-4 text-xs font-mono text-cyan-100/80">
                       <span className="truncate max-w-sm">{fileName || 'uploaded diagram'}</span>
                       <span className="w-1.5 h-1.5 rounded-full bg-cyan-300 animate-pulse"></span>
-                      <span>Extracting dimensions, material, features, and costing inputs...</span>
+                      <span>{scanPreviewPhase === 'scan' ? 'Extracting dimensions, material, features, and costing inputs...' : 'Clean drawing preview displayed. Waiting for extracted tables...'}</span>
                     </div>
                   </div>
                 </div>
@@ -1539,7 +2628,7 @@ export default function App() {
                         : 'px-6 py-3 bg-[#0f62fe] hover:bg-blue-700 text-white text-sm min-w-[220px]'
                     }`}
                     onClick={isExtractionComplete ? calculateCost : handleManualExtract}
-                    disabled={isAnalyzing || isCalculating}
+                    disabled={isAnalyzing || isCalculating || (isExtractionComplete && hasBlockingMissingChildDrawings)}
                   >
                     {isAnalyzing || isCalculating ? (
                       <RefreshCw className={`${isExtractionComplete ? 'w-5 h-5' : 'w-3.5 h-3.5'} animate-spin`} />
@@ -1604,6 +2693,88 @@ export default function App() {
                       Change rates after extraction, then click the large Calculate Cost button to refresh totals.
                     </div>
                   </div>
+
+                  {referencedDrawings.length > 0 && (
+                    <div className="space-y-4 p-4 bg-amber-50 border border-amber-200 rounded-lg shadow-sm">
+                      <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                        <div className="flex items-start gap-3">
+                          <div className="mt-0.5 h-8 w-8 rounded bg-amber-100 border border-amber-200 flex items-center justify-center flex-shrink-0">
+                            <AlertTriangle className="w-4 h-4 text-amber-700" />
+                          </div>
+                          <div>
+                            <h3 className="font-black text-xs uppercase tracking-widest text-amber-900">Referenced Child Drawings</h3>
+                            <p className="text-xs text-amber-900/75 mt-1">
+                              This drawing references detail files. Upload them for better costing, or continue using only the current drawing.
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="px-3 py-2 bg-white hover:bg-amber-100 border border-amber-300 rounded text-[10px] font-black uppercase tracking-wider text-amber-900 transition-colors"
+                          onClick={() => {
+                            setAllowMissingChildDrawings(true);
+                            triggerToast('Missing child drawings will be skipped for this calculation.');
+                          }}
+                        >
+                          Calculate without missing file
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {referencedDrawings.map((drawing) => {
+                          const uploadedName = childDrawingUploads[drawing.drawing_number];
+                          const isMissing = drawing.required_for_costing !== false && !uploadedName;
+                          return (
+                            <div key={drawing.drawing_number} className="p-3 bg-white border border-amber-200 rounded-md space-y-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div className="text-[10px] uppercase font-bold text-slate-500">Missing / referenced file</div>
+                                  <div className="font-mono font-black text-sm text-slate-950">
+                                    {drawing.file_name_hint || `${drawing.drawing_number}.tif`}
+                                  </div>
+                                  <div className="text-[11px] text-slate-600 mt-1">
+                                    {drawing.referenced_by_component || drawing.referenced_by_part_number || 'Referenced child detail'}
+                                  </div>
+                                </div>
+                                <span className={`px-2 py-1 rounded text-[9px] uppercase font-black ${isMissing ? 'bg-amber-100 text-amber-800' : 'bg-emerald-50 text-emerald-700'}`}>
+                                  {isMissing ? 'Needed' : 'Attached'}
+                                </span>
+                              </div>
+                              {drawing.reason && (
+                                <p className="text-[11px] leading-relaxed text-slate-600">{drawing.reason}</p>
+                              )}
+                              <div className="flex items-center gap-2">
+                                <label className="cursor-pointer inline-flex items-center gap-2 px-3 py-2 rounded bg-[#004ccd] hover:bg-blue-700 text-white text-[10px] font-black uppercase tracking-wider transition-colors">
+                                  <Upload className="w-3.5 h-3.5" />
+                                  Upload child file
+                                  <input
+                                    type="file"
+                                    accept=".tif,.tiff,.pdf,.png,.jpg,.jpeg"
+                                    className="hidden"
+                                    onChange={(event) => handleChildDrawingUpload(drawing.drawing_number, event.target.files?.[0])}
+                                  />
+                                </label>
+                                {uploadedName && (
+                                  <span className="text-[11px] text-emerald-700 font-semibold truncate">{uploadedName}</span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {hasBlockingMissingChildDrawings && (
+                        <div className="text-[11px] text-amber-900 bg-amber-100/70 border border-amber-200 rounded px-3 py-2">
+                          Cost calculation is paused until you upload the missing child file or click “Calculate without missing file”.
+                        </div>
+                      )}
+                      {allowMissingChildDrawings && missingReferencedDrawings.length > 0 && (
+                        <div className="text-[11px] text-slate-600 bg-white border border-amber-200 rounded px-3 py-2">
+                          Continuing without: {missingReferencedDrawings.map((drawing) => drawing.file_name_hint || `${drawing.drawing_number}.tif`).join(', ')}.
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* SECTION 1: PART INFORMATION */}
                   <div className="space-y-4">
@@ -2117,10 +3288,16 @@ export default function App() {
                         <div className="text-white text-sm font-black uppercase tracking-wider truncate">
                           {selectedPartPreview
                             ? `Part ${selectedPartPreview.part_number}: ${selectedPartPreview.component_name || selectedPartPreview.tube_type || selectedPartPreview.component_type}`
+                            : selectedReferencePreview
+                              ? selectedReferencePreview
                             : (fileName || 'Drawing preview')}
                         </div>
                         <div className="text-slate-400 text-xs">
-                          {selectedPartPreview ? 'Showing selected part crop. Click X to return.' : 'Extracted parts are marked in red. Click X to return.'}
+                          {selectedPartPreview
+                            ? 'Showing selected part crop. Click X to return.'
+                            : selectedReferencePreview
+                              ? 'Showing reference part image. Click X to return.'
+                              : 'Extracted parts are marked in red. Click X to return.'}
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
@@ -2146,6 +3323,8 @@ export default function App() {
                           onClick={() => {
                             setIsPreviewFullscreen(false);
                             setSelectedPartPreview(null);
+                            setSelectedReferencePreview(null);
+                            setSelectedReferencePart(null);
                           }}
                           title="Close fullscreen preview"
                         >
@@ -2178,6 +3357,26 @@ export default function App() {
                           )}
                           <div className="absolute left-4 top-4 bg-slate-950/85 text-white px-3 py-2 rounded text-xs font-black uppercase tracking-wider">
                             Selected Part Crop
+                          </div>
+                          {renderPartImageActions(selectedPartPreview, false)}
+                        </div>
+                      ) : selectedReferencePreview ? (
+                        <div
+                          className="relative bg-white border border-slate-700 shadow-2xl overflow-hidden"
+                          style={{
+                            width: 'min(92vw, 1120px)',
+                            height: 'min(78vh, 720px)',
+                            transform: `scale(${zoomLevel / 100})`,
+                            transformOrigin: 'center',
+                          }}
+                        >
+                          <img
+                            src={partReferenceImageUrl(selectedReferencePart)}
+                            alt="Reference image of pillar assembly parts"
+                            className="absolute inset-0 w-full h-full object-contain bg-white"
+                          />
+                          <div className="absolute left-4 top-4 bg-slate-950/85 text-white px-3 py-2 rounded text-xs font-black uppercase tracking-wider">
+                            Reference Part Image
                           </div>
                         </div>
                       ) : (
@@ -2233,7 +3432,14 @@ export default function App() {
                       <div className="absolute inset-0 opacity-30 bg-[radial-gradient(circle_at_center,_#1d4ed8_0,_transparent_55%)]"></div>
                       <div className="relative w-[88%] h-[78%]" style={{ transformStyle: 'preserve-3d', animation: isAnalyzing ? 'documentFloat 3s ease-in-out infinite' : undefined }}>
                         <div className="absolute inset-0 bg-white rounded border border-blue-200 shadow-2xl overflow-hidden">
-                          {filePreview ? (
+                          {scanPreviewPhase === 'reference' ? (
+                            <img
+                              src={filePreview || DEFAULT_IMAGE_URL}
+                              alt="Clean uploaded drawing preview"
+                              onLoad={handlePreviewImageLoad}
+                              className="w-full h-full object-contain opacity-100 bg-white"
+                            />
+                          ) : filePreview ? (
                             <img
                               src={filePreview}
                               alt="Uploaded engineering drawing in 3D scan preview"
@@ -2245,7 +3451,7 @@ export default function App() {
                               Upload diagram
                             </div>
                           )}
-                          {isAnalyzing && (
+                          {isAnalyzing && scanPreviewPhase === 'scan' && (
                             <>
                               <div className="absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-cyan-300/70 via-cyan-300/20 to-transparent" style={{ animation: 'documentScan 1.6s linear infinite' }}></div>
                               <div className="absolute inset-x-0 top-0 h-0.5 bg-cyan-300 shadow-[0_0_18px_rgba(103,232,249,0.95)]" style={{ animation: 'documentScan 1.6s linear infinite' }}></div>
@@ -2256,7 +3462,7 @@ export default function App() {
                       </div>
                       <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between text-[10px] font-mono text-cyan-100">
                         <span>{fileName || 'No file selected'}</span>
-                        <span>{isAnalyzing ? 'Extracting dimensions...' : 'Click Extract From Diagram'}</span>
+                        <span>{isAnalyzing ? (scanPreviewPhase === 'scan' ? 'Extracting dimensions...' : 'Clean preview ready...') : 'Click Extract From Diagram'}</span>
                       </div>
                     </div>
                   </div>
@@ -2270,15 +3476,27 @@ export default function App() {
                       <span className="font-bold text-xs uppercase tracking-wider text-slate-900">Estimation breakdown</span>
                     </div>
                     {isExtractionComplete && (
-                      <button
-                        type="button"
-                        className="px-3 py-1.5 bg-white hover:bg-[#004ccd] border border-[#004ccd]/30 hover:border-[#004ccd] text-[#004ccd] hover:text-white rounded text-[10px] font-black uppercase tracking-wider transition-colors flex items-center gap-1.5 disabled:opacity-60"
-                        onClick={calculateCost}
-                        disabled={isCalculating}
-                      >
-                        {isCalculating ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Calculator className="w-3.5 h-3.5" />}
-                        {estimation ? 'Recalculate' : 'Calculate'}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {estimation && (
+                          <button
+                            type="button"
+                            className="px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 rounded text-[10px] font-black uppercase tracking-wider transition-colors flex items-center gap-1.5"
+                            onClick={() => setIsPartSummaryOpen(true)}
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            Part Summary
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="px-3 py-1.5 bg-white hover:bg-[#004ccd] border border-[#004ccd]/30 hover:border-[#004ccd] text-[#004ccd] hover:text-white rounded text-[10px] font-black uppercase tracking-wider transition-colors flex items-center gap-1.5 disabled:opacity-60"
+                          onClick={calculateCost}
+                          disabled={isCalculating || hasBlockingMissingChildDrawings}
+                        >
+                          {isCalculating ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Calculator className="w-3.5 h-3.5" />}
+                          {estimation ? 'Recalculate' : 'Calculate'}
+                        </button>
+                      </div>
                     )}
                   </div>
 
@@ -2328,16 +3546,21 @@ export default function App() {
                               </div>
                             )}
                             {estimation.stockSummary && (
-                              <div className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1">
+                              <button
+                                type="button"
+                                className="p-3 bg-slate-50 rounded border border-slate-100 space-y-1 text-left hover:border-[#004ccd] hover:bg-blue-50/40 transition-colors"
+                                onClick={() => openBreakdown('Allocated Scrap / Offcut', allocatedScrapBreakdownSteps())}
+                              >
                                 <span className="text-[10px] uppercase font-bold text-slate-400">Allocated Scrap / Offcut</span>
-                                <div className="text-sm font-black text-slate-900">{displayedScrapWeightKg.toFixed(3)} kg</div>
+                                <div className="text-sm font-black text-slate-900 underline decoration-dotted underline-offset-4">{displayedScrapWeightKg.toFixed(3)} kg</div>
                                 <div className="text-[11px] text-slate-500 font-mono">
                                   {formatInr(displayedScrapValue)} @ Rs {displayedScrapRate}/kg
                                 </div>
                                 {structuredScrapWeightKg !== null && (
                                   <div className="text-[10px] text-slate-400">from part-wise structured breakdown</div>
                                 )}
-                              </div>
+                                <div className="text-[10px] text-[#004ccd] font-bold uppercase tracking-wider">View breakdown</div>
+                              </button>
                             )}
                           </div>
                         )}
@@ -2432,36 +3655,67 @@ export default function App() {
                                       </summary>
 
                                       <div className="p-3 space-y-3">
-                                        <div className="p-2 bg-slate-950 rounded border border-slate-800">
-                                          <div className="flex items-center justify-between gap-2 mb-2">
-                                            <div className="text-[9px] uppercase font-bold text-slate-400">Part Drawing Preview</div>
-                                            <div className="text-[9px] font-mono text-slate-500">{partImageRegionLabel(part)}</div>
-                                          </div>
-                                          <button
-                                            type="button"
-                                            className="h-56 w-full bg-white rounded overflow-hidden border border-slate-700 relative cursor-zoom-in block"
-                                            onClick={() => {
-                                              setSelectedPartPreview(part);
-                                              setIsPreviewFullscreen(true);
-                                            }}
-                                            title="Open selected part crop"
-                                          >
-                                            {hasPartImageRegion(part) ? (
-                                              <img
-                                                src={filePreview || DEFAULT_IMAGE_URL}
-                                                alt={`Part ${part.part_number} drawing crop`}
-                                                style={partCropImageStyle(part)}
-                                              />
-                                            ) : (
-                                              <div className="w-full h-full flex items-center justify-center text-[11px] text-slate-500 text-center px-4">
-                                                Specific drawing/detail region is not available. BOM/table rows are ignored because they are not real part images.
-                                              </div>
-                                            )}
-                                            <div className="absolute bottom-2 right-2 bg-slate-950/80 text-white px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider flex items-center gap-1">
-                                              <Maximize2 className="w-3 h-3" />
-                                              Open crop
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                          <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                                            <div className="flex items-center justify-between gap-2 mb-2">
+                                              <div className="text-[9px] uppercase font-bold text-slate-400">Diagram crop</div>
+                                              <div className="text-[9px] font-mono text-slate-500">{partImageRegionLabel(part)}</div>
                                             </div>
-                                          </button>
+                                            <div className="h-56 w-full bg-white rounded overflow-hidden border border-slate-700 relative block">
+                                              {hasPartImageRegion(part) ? (
+                                                <img
+                                                  src={filePreview || DEFAULT_IMAGE_URL}
+                                                  alt={`Part ${part.part_number} drawing crop`}
+                                                  style={partCropImageStyle(part)}
+                                                />
+                                              ) : (
+                                                <div className="w-full h-full flex items-center justify-center text-[11px] text-slate-500 text-center px-4">
+                                                  Specific drawing/detail region is not available. BOM/table rows are ignored because they are not real part images.
+                                                </div>
+                                              )}
+                                              <button
+                                                type="button"
+                                                className="absolute top-2 right-2 bg-slate-950/80 text-white px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider flex items-center gap-1 hover:bg-slate-800"
+                                                onClick={() => {
+                                                  setSelectedPartPreview(part);
+                                                  setSelectedReferencePreview(null);
+                                                  setIsPreviewFullscreen(true);
+                                                }}
+                                                title="Open selected part crop"
+                                              >
+                                                <Maximize2 className="w-3 h-3" />
+                                                Open crop
+                                              </button>
+                                              {renderPartImageActions(part, true)}
+                                            </div>
+                                          </div>
+                                          <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                                            <div className="flex items-center justify-between gap-2 mb-2">
+                                              <div className="text-[9px] uppercase font-bold text-slate-400">Reference part image</div>
+                                              <div className="text-[9px] font-mono text-slate-500">visual reference</div>
+                                            </div>
+                                            <button
+                                              type="button"
+                                              className="h-56 w-full bg-white rounded overflow-hidden border border-slate-700 relative block cursor-zoom-in"
+                                              onClick={() => {
+                                                setSelectedPartPreview(null);
+                                                setSelectedReferencePart(part);
+                                                setSelectedReferencePreview(`Part ${part.part_number}: Reference Image`);
+                                                setIsPreviewFullscreen(true);
+                                              }}
+                                              title="Open reference part image"
+                                            >
+                                              <img
+                                                src={partReferenceImageUrl(part)}
+                                                alt={`Reference image for part ${part.part_number}`}
+                                                className="absolute inset-0 w-full h-full object-contain bg-white"
+                                              />
+                                              <div className="absolute top-2 right-2 bg-slate-950/80 text-white px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider flex items-center gap-1">
+                                                <Maximize2 className="w-3 h-3" />
+                                                Open image
+                                              </div>
+                                            </button>
+                                          </div>
                                         </div>
 
                                         <div className="grid grid-cols-2 gap-2">
@@ -2795,10 +4049,20 @@ export default function App() {
                             <h5 className="font-bold text-xs text-slate-800 uppercase tracking-wider">Nesting / Stock Approach</h5>
                             <div className="space-y-2">
                               {estimation.items.filter(item => item.nestingApproach).map((item, idx) => (
-                                <div key={`${item.name}-nest-${idx}`} className="p-3 bg-slate-50 rounded border border-slate-200">
-                                  <div className="text-xs font-bold text-slate-800">{item.name}</div>
-                                  <div className="text-[11px] leading-relaxed text-slate-600">{item.nestingApproach}</div>
-                                </div>
+                                <button
+                                  type="button"
+                                  key={`${item.name}-nest-${idx}`}
+                                  className="w-full p-3 bg-slate-50 hover:bg-blue-50/60 rounded border border-slate-200 hover:border-[#004ccd] text-left transition-colors group"
+                                  onClick={() => setSelectedNestingItem(item)}
+                                >
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div className="text-xs font-bold text-slate-800">{item.name}</div>
+                                    <div className="text-[9px] uppercase font-black tracking-wider text-[#004ccd] opacity-0 group-hover:opacity-100 transition-opacity">
+                                      View nesting
+                                    </div>
+                                  </div>
+                                  <div className="text-[11px] leading-relaxed text-slate-600 mt-1">{item.nestingApproach}</div>
+                                </button>
                               ))}
                               {estimation.stockSummary && (
                                 <div className="text-[11px] leading-relaxed text-slate-500">{estimation.stockSummary.approach}</div>
@@ -2929,7 +4193,7 @@ export default function App() {
                             type="button"
                             className="mt-2 px-6 py-3 bg-[#004ccd] hover:bg-[#0f62fe] disabled:bg-slate-300 disabled:text-slate-500 text-white rounded font-black uppercase tracking-wider text-xs shadow-sm transition-colors flex items-center gap-2"
                             onClick={calculateCost}
-                            disabled={isCalculating}
+                            disabled={isCalculating || hasBlockingMissingChildDrawings}
                           >
                             {isCalculating ? (
                               <RefreshCw className="w-4 h-4 animate-spin" />
