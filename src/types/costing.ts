@@ -115,6 +115,19 @@ export interface StructuredBreakdown {
       unit_scrap_waste_weight_kg: number;
       total_set_gross_weight_kg: number;
     };
+    stock_nesting?: {
+      stock_form: string;
+      stock_length_mm?: number | null;
+      stock_width_mm?: number | null;
+      part_length_mm?: number | null;
+      part_width_mm?: number | null;
+      parts_per_stock: number;
+      stock_count: number;
+      stock_weight_kg: number;
+      scrap_weight_kg: number;
+      leftover_per_stock_mm?: number | null;
+      approach: string;
+    };
     nesting_layout_hint: {
       nesting_strategy: string;
       recommended_grain_or_cut_direction: string;
@@ -159,6 +172,13 @@ export interface EstimationResult {
     scrapValue?: number;
     netStockCostPerPart?: number;
     nestingApproach?: string;
+    stockCount?: number;
+    stockWeightKg?: number;
+    stockLengthMm?: number;
+    stockWidthMm?: number;
+    partLengthMm?: number;
+    partWidthMm?: number;
+    leftoverMm?: number;
     formulas?: Record<string, CalculationStep>;
   }>;
   assumptions?: string[];

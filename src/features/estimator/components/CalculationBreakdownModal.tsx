@@ -19,8 +19,6 @@ export function CalculationBreakdownModal({
   selectedBreakdown,
   onClose,
   cleanBreakdownText,
-  simpleBreakdownMeaning,
-  onOpenStepSource,
 }: CalculationBreakdownModalProps) {
   if (!selectedBreakdown) return null;
 
@@ -41,7 +39,7 @@ export function CalculationBreakdownModal({
         </div>
         <div className="p-5 overflow-y-auto custom-scrollbar space-y-3">
           {selectedBreakdown.steps.map((step, idx) => (
-            <div key={`${step.name}-${idx}`} className="p-4 bg-white rounded-lg border border-slate-200 shadow-sm space-y-3">
+            <div key={`${step.name}-${idx}`} className="p-4 bg-white rounded-lg border border-slate-200 shadow-sm space-y-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="text-[10px] uppercase font-bold text-[#004ccd] tracking-wider">{step.section}</div>
@@ -51,29 +49,16 @@ export function CalculationBreakdownModal({
                   {cleanBreakdownText(step.result)}
                 </div>
               </div>
-              <div className="p-3 bg-blue-50/60 border border-blue-100 rounded-md">
-                <div className="text-[10px] uppercase font-black text-[#004ccd] mb-1">Simple meaning</div>
-                <div className="text-xs text-slate-700 leading-relaxed">{simpleBreakdownMeaning(step)}</div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  className="p-3 bg-slate-50 rounded border border-slate-100 text-left hover:border-[#004ccd] hover:bg-blue-50/50 transition-colors"
-                  onClick={() => onOpenStepSource(`Formula Source: ${step.name}`, step)}
-                >
+
+              <div className="space-y-3">
+                <div>
                   <div className="text-[10px] uppercase font-black text-slate-500 mb-1">Formula</div>
-                  <div className="font-mono text-xs text-slate-800 leading-relaxed">{cleanBreakdownText(step.formula)}</div>
-                  <div className="text-[9px] uppercase font-bold text-[#004ccd] mt-2">Click for source</div>
-                </button>
-                <button
-                  type="button"
-                  className="p-3 bg-slate-50 rounded border border-slate-100 text-left hover:border-[#004ccd] hover:bg-blue-50/50 transition-colors"
-                  onClick={() => onOpenStepSource(`Values Used: ${step.name}`, step)}
-                >
+                  <div className="font-mono text-sm text-slate-900 leading-relaxed">{cleanBreakdownText(step.formula)}</div>
+                </div>
+                <div className="pt-3 border-t border-slate-100">
                   <div className="text-[10px] uppercase font-black text-slate-500 mb-1">Values used</div>
-                  <div className="font-mono text-xs text-slate-800 leading-relaxed">{cleanBreakdownText(step.substitutedValues)}</div>
-                  <div className="text-[9px] uppercase font-bold text-[#004ccd] mt-2">Click for source</div>
-                </button>
+                  <div className="font-mono text-sm text-slate-900 leading-relaxed">{cleanBreakdownText(step.substitutedValues)}</div>
+                </div>
               </div>
             </div>
           ))}

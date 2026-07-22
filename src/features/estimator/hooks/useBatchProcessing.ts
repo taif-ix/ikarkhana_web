@@ -55,7 +55,7 @@ export function useBatchProcessing({
 
       let isDone = false;
       while (!isDone) {
-        await wait(1800);
+        await wait(900);
         const statusResponse = await fetch(`/api/batch-process/status?jobId=${encodeURIComponent(result.data.job_id)}`, {
           cache: 'no-store',
         });
@@ -106,7 +106,7 @@ export function useBatchProcessing({
 
       let isDone = false;
       while (!isDone) {
-        await wait(1800);
+        await wait(900);
         const statusResponse = await fetch(`/api/batch-process/status?jobId=${encodeURIComponent(batchJobId)}`, {
           cache: 'no-store',
         });

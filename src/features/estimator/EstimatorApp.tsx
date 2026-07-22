@@ -7,7 +7,6 @@ import {
   FileText, 
   Plus, 
   ArrowRight, 
-  CloudDownload, 
   ShieldCheck, 
   Scale, 
   Flame, 
@@ -37,6 +36,7 @@ import {
 } from 'lucide-react';
 import { DEFAULT_AVATAR_URL, DEFAULT_IMAGE_URL } from '../../constants/assets';
 import { formatInr } from '../../lib/formatters';
+import { dependencyFallbacksFor } from './lib/dependencyFallbacks';
 import {
   CalculationBreakdownModal,
   ExportActions,
@@ -70,6 +70,8 @@ export default function App() {
   const [structuredBreakdownCache, setStructuredBreakdownCache] = useState<StructuredBreakdown | null>(null);
   const [batchUploadFiles, setBatchUploadFiles] = useState<BatchUploadFile[]>([]);
   const [selectedBatchParentName, setSelectedBatchParentName] = useState<string>('');
+  const [isUploadExpanding, setIsUploadExpanding] = useState(false);
+  const [uploadPreparingCount, setUploadPreparingCount] = useState(0);
   const [isBatchScanning, setIsBatchScanning] = useState(false);
   const [isBatchReady, setIsBatchReady] = useState(false);
   const [isBatchDependencyScanning, setIsBatchDependencyScanning] = useState(false);
@@ -198,35 +200,52 @@ export default function App() {
 
   const drawingBase = (name: string) => name.toLowerCase().replace(/\.[^.]+$/, '').trim();
 
+  const DEPENDENCY_SCAN_CONCURRENCY = 3;
+
   const scanDependencyHintsForFiles = async (files: BatchUploadFile[]) => {
     const scannedHints: Record<string, string[]> = {};
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 20000);
-    try {
-      const response = await fetch('/api/batch-reference-scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: files.map(file => ({ filename: file.name, image: file.image })) }),
-        signal: controller.signal,
-      });
-      const result = await response.json();
-      const scannedFiles = Array.isArray(result?.data?.files) ? result.data.files : [];
-      scannedFiles.forEach((fileResult: any) => {
-        const fileName = String(fileResult.file_name || fileResult.fileName || '').trim();
-        const references = Array.isArray(fileResult?.referenced_drawings) ? fileResult.referenced_drawings : [];
+
+    const scanOneFile = async (file: BatchUploadFile) => {
+      const key = drawingBase(file.name);
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 18000);
+      try {
+        const response = await fetch('/api/reference-scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: file.name, image: file.image }),
+          signal: controller.signal,
+        });
+        const result = await response.json();
+        const references = Array.isArray(result?.data?.referenced_drawings) ? result.data.referenced_drawings : [];
         const hints = references
           .map((reference: any) => String(reference.file_name_hint || `${reference.drawing_number || ''}.tif`).trim())
           .filter((hint: string) => hint && hint !== '.tif');
-        if (fileName) {
-          scannedHints[drawingBase(fileName)] = Array.from(new Set(hints));
-        }
-      });
-    } catch {
-      files.forEach(file => {
-        scannedHints[drawingBase(file.name)] = [];
-      });
-    } finally {
-      window.clearTimeout(timeoutId);
+        scannedHints[key] = Array.from(new Set(hints));
+      } catch {
+        scannedHints[key] = [];
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+
+      setBatchDependencyHints(prev => ({
+        ...prev,
+        [key]: scannedHints[key] || [],
+      }));
+    };
+
+    let nextIndex = 0;
+    const workerCount = Math.min(DEPENDENCY_SCAN_CONCURRENCY, files.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (nextIndex < files.length) {
+        const file = files[nextIndex];
+        nextIndex += 1;
+        await scanOneFile(file);
+      }
+    });
+
+    if (workers.length > 0) {
+      await Promise.all(workers);
     }
     return scannedHints;
   };
@@ -247,6 +266,10 @@ export default function App() {
   };
 
   const handleUploadedFiles = async (files: File[]) => {
+    setIsUploadExpanding(true);
+    setUploadPreparingCount(files.length);
+    setCurrentScreen('landing');
+    setActiveTab('projects');
     try {
       const formData = new FormData();
       files.forEach(file => formData.append('uploads', file));
@@ -271,6 +294,7 @@ export default function App() {
       }
 
       if (staged.length === 1) {
+        setIsUploadExpanding(false);
         await startExtractionFromData(staged[0].image, staged[0].name, staged[0].sizeMb);
         return;
       }
@@ -278,6 +302,9 @@ export default function App() {
       stageNormalizedFiles(staged);
     } catch (error: any) {
       triggerToast(error?.message || 'Could not read one or more uploaded files. Please try again.');
+    } finally {
+      setIsUploadExpanding(false);
+      setUploadPreparingCount(0);
     }
   };
 
@@ -288,10 +315,12 @@ export default function App() {
     }
     setIsBatchReady(false);
     setIsBatchScanning(true);
-    const scanDelay = new Promise<void>((resolve) => window.setTimeout(resolve, 9200));
-    const hasScannedHints = Object.keys(batchDependencyHints).length > 0;
+    const scanDelay = new Promise<void>((resolve) => window.setTimeout(resolve, 1800));
+    const hasScannedHints = batchUploadFiles.every(file =>
+      Object.prototype.hasOwnProperty.call(batchDependencyHints, drawingBase(file.name))
+    );
     const scanTimeout = new Promise<Record<string, string[]>>((resolve) => {
-      window.setTimeout(() => resolve(batchDependencyHints), 15000);
+      window.setTimeout(() => resolve(batchDependencyHints), 8000);
     });
     const hints = hasScannedHints
       ? batchDependencyHints
@@ -306,18 +335,25 @@ export default function App() {
   };
 
   /*
-    Batch dependency detection has two layers:
-    1. Gemini pre-scan fills batchDependencyHints for each uploaded file.
-    2. staticDependencyMap remains a fallback for known sample drawings if the pre-scan fails.
+    Batch dependency detection is AI driven:
+    Gemini pre-scan fills batchDependencyHints for each uploaded file.
   */
   const expectedChildFileHints = (parentName: string) => {
     const key = drawingBase(parentName);
-    return Array.from(new Set(batchDependencyHints[key] || []));
+    if (!Object.prototype.hasOwnProperty.call(batchDependencyHints, key)) {
+      return [];
+    }
+    const aiHints = batchDependencyHints[key] || [];
+    return Array.from(new Set(aiHints.length > 0 ? aiHints : dependencyFallbacksFor(key)));
   };
 
   const expectedChildFileHintsFromMap = (parentName: string, hintsMap: Record<string, string[]>) => {
     const key = drawingBase(parentName);
-    return Array.from(new Set(hintsMap[key] || []));
+    if (!Object.prototype.hasOwnProperty.call(hintsMap, key)) {
+      return [];
+    }
+    const aiHints = hintsMap[key] || [];
+    return Array.from(new Set(aiHints.length > 0 ? aiHints : dependencyFallbacksFor(key)));
   };
 
   const fileMatchesHint = (file: BatchUploadFile, hint: string) =>
@@ -489,10 +525,23 @@ export default function App() {
         weightKg: Number(part.weight_ledger?.unit_net_finished_weight_kg || 0),
         materialCost: Number(part.calculated_costs?.material_cost || 0),
         materialLabel: part.material_type || 'material',
-        partsPerStock: undefined,
+        stockForm: part.stock_nesting?.stock_form,
+        stockSize: part.stock_nesting?.stock_width_mm
+          ? `${part.stock_nesting.stock_length_mm || 0} x ${part.stock_nesting.stock_width_mm} mm`
+          : part.stock_nesting?.stock_length_mm
+            ? `${part.stock_nesting.stock_length_mm} mm`
+            : undefined,
+        partsPerStock: Number(part.stock_nesting?.parts_per_stock || 0) || undefined,
+        stockCount: Number(part.stock_nesting?.stock_count || 0) || undefined,
+        stockWeightKg: Number(part.stock_nesting?.stock_weight_kg || 0) || undefined,
+        stockLengthMm: Number(part.stock_nesting?.stock_length_mm || 0) || undefined,
+        stockWidthMm: Number(part.stock_nesting?.stock_width_mm || 0) || undefined,
+        partLengthMm: Number(part.stock_nesting?.part_length_mm || 0) || undefined,
+        partWidthMm: Number(part.stock_nesting?.part_width_mm || 0) || undefined,
+        leftoverMm: Number(part.stock_nesting?.leftover_per_stock_mm || 0) || undefined,
         scrapWeightKg: Number(part.weight_ledger?.unit_scrap_waste_weight_kg || 0),
         scrapValue: Number(part.weight_ledger?.unit_scrap_waste_weight_kg || 0) * Number(params.scrapRate || 28),
-        nestingApproach: part.nesting_layout_hint?.nesting_strategy,
+        nestingApproach: part.stock_nesting?.approach || part.nesting_layout_hint?.nesting_strategy,
       })),
       structuredBreakdown: structured,
     };
@@ -746,19 +795,6 @@ export default function App() {
     void runExtractionPipeline(base64String, name, childFiles);
   };
 
-  // Select sample drawing instantly
-  const handleSelectSample = () => {
-    setFileName('Chassis_Bracket_Drawing_v2.4.dwg');
-    setFileSize('4.25 MB');
-    setFilePreview(DEFAULT_IMAGE_URL);
-    setUploadedImageData('');
-    setUploadedImageName('');
-    setChildDrawingUploads({});
-    setChildDrawingImages({});
-    setAllowMissingChildDrawings(false);
-    runExtractionPipeline(DEFAULT_IMAGE_URL, 'Chassis_Bracket_Drawing_v2.4.dwg');
-  };
-
   // Pipeline simulation or real Gemini extraction
   const runExtractionPipeline = async (imgData: string, name: string, batchChildFiles: BatchUploadFile[] = []) => {
     setIsAnalyzing(true);
@@ -878,7 +914,7 @@ export default function App() {
   const missingReferencedDrawings = referencedDrawings.filter(
     (drawing) => drawing.required_for_costing !== false && !childDrawingUploads[drawing.drawing_number]
   );
-  const hasBlockingMissingChildDrawings = missingReferencedDrawings.length > 0 && !allowMissingChildDrawings;
+  const hasBlockingMissingChildDrawings = false;
 
   const handleChildDrawingUpload = (drawingNumber: string, file?: File | null) => {
     if (!file) return;
@@ -895,11 +931,6 @@ export default function App() {
 
   // Trigger costing calculations
   const calculateCost = async () => {
-    if (hasBlockingMissingChildDrawings) {
-      triggerToast('Upload missing child drawings or choose calculate without missing files.');
-      return;
-    }
-
     setIsCalculating(true);
     try {
       const response = await fetch('/api/estimate', {
@@ -1842,9 +1873,277 @@ export default function App() {
   const structuredStepsFor = (part: StructuredBreakdown['per_part_breakdown'][number], needles: string[]) => {
     const normalizedNeedles = needles.map(needle => needle.toLowerCase());
     return mapStructuredSteps(part.calculation_steps).filter(step => {
-      const haystack = `${step.section} ${step.name} ${step.formula}`.toLowerCase();
+      const haystack = `${step.section} ${step.name}`.toLowerCase();
       return normalizedNeedles.some(needle => haystack.includes(needle));
     });
+  };
+
+  const structuredStepByName = (part: StructuredBreakdown['per_part_breakdown'][number], needle: string) => {
+    const normalizedNeedle = needle.toLowerCase();
+    return mapStructuredSteps(part.calculation_steps).filter(step => step.name.toLowerCase().includes(normalizedNeedle)).slice(0, 1);
+  };
+
+  const setGrossWeightBreakdownSteps = (part: StructuredBreakdown['per_part_breakdown'][number]): CalculationStep[] => {
+    const unitGross = Number(part.weight_ledger?.unit_gross_rm_weight_kg || 0);
+    const qty = Number(part.per_set_qty || 1);
+    const total = Number(part.weight_ledger?.total_set_gross_weight_kg || 0);
+    return [{
+      section: 'Weight',
+      name: `Part ${part.part_number} total set gross weight`,
+      formula: 'Total set gross weight = unit gross RM weight x quantity',
+      substitutedValues: `${unitGross.toFixed(3)} kg x ${qty} pcs`,
+      result: `${total.toFixed(3)} kg`,
+    }];
+  };
+
+  const laserLengthBreakdownSteps = (part: StructuredBreakdown['per_part_breakdown'][number]): CalculationStep[] => {
+    const dims = part.dimensions || {};
+    const length = Number(dims.length_mm || 0);
+    const width = Number(dims.width_or_outer_dia_mm || 0);
+    const secondary = Number(dims.secondary_width_mm || 0);
+    const laserLength = Number(part.cutting_metrics?.laser_cutting_length_mm || 0);
+    const text = `${part.component_type || ''} ${part.tube_type || ''} ${part.component_name || ''}`.toLowerCase();
+
+    if (laserLength <= 0) {
+      return [{
+        section: 'Process',
+        name: `Part ${part.part_number} laser cutting length`,
+        formula: 'Laser cutting length was not extracted',
+        substitutedValues: 'No visible cut path length found for this part',
+        result: '0 mm',
+      }];
+    }
+
+    if ((text.includes('sheet') || text.includes('plate')) && length > 0 && width > 0) {
+      return [{
+        section: 'Process',
+        name: `Part ${part.part_number} laser cutting length`,
+        formula: 'Rectangular cutting length = 2 x (length + width)',
+        substitutedValues: `2 x (${length} mm + ${width} mm)`,
+        result: `${laserLength} mm`,
+      }];
+    }
+
+    if ((text.includes('round') || text.includes('circular') || text.includes('dia')) && width > 0) {
+      return [{
+        section: 'Process',
+        name: `Part ${part.part_number} laser cutting length`,
+        formula: 'Circular cutting length = pi x diameter',
+        substitutedValues: `pi x ${width} mm`,
+        result: `${laserLength} mm`,
+      }];
+    }
+
+    if ((text.includes('square') || text.includes('rect')) && width > 0) {
+      const b = secondary > 0 ? secondary : width;
+      return [{
+        section: 'Process',
+        name: `Part ${part.part_number} laser cutting length`,
+        formula: 'Profile cutting length = 2 x (outer A + outer B)',
+        substitutedValues: `2 x (${width} mm + ${b} mm)`,
+        result: `${laserLength} mm`,
+      }];
+    }
+
+    return [{
+      section: 'Process',
+      name: `Part ${part.part_number} laser cutting length`,
+      formula: 'Laser cutting length = visible cut path length extracted from drawing',
+      substitutedValues: `Extracted laser cutting length = ${laserLength} mm`,
+      result: `${laserLength} mm`,
+    }];
+  };
+
+  const singleValueStep = (
+    section: string,
+    name: string,
+    formula: string,
+    substitutedValues: string,
+    result: string,
+  ): CalculationStep => ({
+    section,
+    name,
+    formula,
+    substitutedValues,
+    result,
+  });
+
+  const itemWeightStep = (item?: EstimateLineItem): CalculationStep[] => {
+    if (!item) {
+      return [
+        singleValueStep(
+          'Weight',
+          'Item weight',
+          'Item weight = extracted/calculated item weight',
+          'No matching item row was found for this summary value',
+          '-',
+        ),
+      ];
+    }
+    if (item.formulas?.weight) {
+      return [item.formulas.weight];
+    }
+    return [
+      singleValueStep(
+        'Weight',
+        `${item.name} weight`,
+        'Part weight = extracted/calculated item weight',
+        `${item.name} weight from costing result`,
+        `${item.weightKg.toFixed(3)} kg`,
+      ),
+    ];
+  };
+
+  const itemMaterialCostStep = (item: EstimateLineItem): CalculationStep[] => {
+    if (item.formulas?.material) {
+      return [item.formulas.material];
+    }
+    return [
+      singleValueStep(
+        'Cost',
+        `${item.name} material cost`,
+        'Material cost = part weight x material rate',
+        `${item.weightKg.toFixed(3)} kg x Rs ${params.materialRate}/kg`,
+        formatInr(item.materialCost),
+      ),
+    ];
+  };
+
+  const itemScrapBreakdownSteps = (item: EstimateLineItem): CalculationStep[] => {
+    const scrapWeight = Number(item.scrapWeightKg || 0);
+    const scrapValue = Number(item.scrapValue || (scrapWeight * displayedScrapRate));
+    return [
+      singleValueStep(
+        'Scrap',
+        `${item.name} scrap weight`,
+        'Scrap weight = stock/offcut weight allocated to this part',
+        item.nestingApproach || `${item.name} allocated scrap = ${scrapWeight.toFixed(3)} kg`,
+        `${scrapWeight.toFixed(3)} kg`,
+      ),
+      singleValueStep(
+        'Scrap Value',
+        `${item.name} scrap value`,
+        'Scrap value = scrap weight x scrap rate',
+        `${scrapWeight.toFixed(3)} kg x Rs ${displayedScrapRate}/kg`,
+        formatInr(scrapValue),
+      ),
+    ];
+  };
+
+  const projectWeightStep = (label: string, unitWeightKg: number, qty: number): CalculationStep[] => [
+    singleValueStep(
+      'Weight',
+      `${label} project total weight`,
+      'Project total weight = unit weight x project quantity',
+      `${unitWeightKg.toFixed(3)} kg x ${qty}`,
+      `${(unitWeightKg * qty).toFixed(3)} kg`,
+    ),
+  ];
+
+  const accumulatedUnitWeightStep = (): CalculationStep[] => {
+    const rows = estimation?.items || [];
+    return [
+      singleValueStep(
+        'Weight',
+        'Accumulated unit material weight',
+        'Accumulated unit weight = sum of item weights',
+        rows.length ? rows.map(item => `${item.weightKg.toFixed(3)} kg`).join(' + ') : 'No item weights available',
+        `${Number(estimation?.summary.unitWeightKg || 0).toFixed(3)} kg`,
+      ),
+    ];
+  };
+
+  const accumulatedProjectWeightStep = (): CalculationStep[] => [
+    singleValueStep(
+      'Weight',
+      'Accumulated project material weight',
+      'Project material weight = accumulated unit weight x project quantity',
+      `${Number(estimation?.summary.unitWeightKg || 0).toFixed(3)} kg x ${Number(estimation?.summary.qty || 1)}`,
+      `${Number(estimation?.summary.totalWeightKg || 0).toFixed(3)} kg`,
+    ),
+  ];
+
+  const processBaseStep = (pd: { name: string; unitCost: number; cost: number }): CalculationStep[] => [
+    singleValueStep(
+      'Process',
+      `${pd.name} base / unit value`,
+      'Base / unit = process base value returned by costing engine',
+      `${pd.name} base / unit`,
+      formatInr(pd.unitCost),
+    ),
+  ];
+
+  const processCostStep = (pd: { name: string; unitCost: number; cost: number }): CalculationStep[] => {
+    const name = pd.name.toLowerCase();
+    const structured = estimation?.structuredBreakdown || structuredBreakdownCache;
+    const parts = structured?.per_part_breakdown || [];
+
+    if (name.includes('laser')) {
+      return [singleValueStep(
+        'Process',
+        `${pd.name} operational cost`,
+        'Laser cutting cost = sum of part laser cutting costs',
+        parts.length
+          ? parts.map(part => `Rs ${Number(part.calculated_costs?.laser_cutting_cost_estimate || 0).toFixed(2)} x ${Number(part.per_set_qty || 1)}`).join(' + ')
+          : `${Number(params.cuttingLength || 0)} mm / 1000 x Rs ${params.cutRate}/m`,
+        formatInr(pd.cost),
+      )];
+    }
+
+    if (name.includes('bend')) {
+      return [singleValueStep(
+        'Process',
+        `${pd.name} operational cost`,
+        'Bending cost = sum of part bending costs',
+        parts.length
+          ? parts.map(part => `Rs ${Number(part.calculated_costs?.bending_cost || 0).toFixed(2)} x ${Number(part.per_set_qty || 1)}`).join(' + ')
+          : `${Number(params.bendCount || 0)} bends x Rs ${params.bendRate}/bend`,
+        formatInr(pd.cost),
+      )];
+    }
+
+    if (name.includes('weld')) {
+      return [singleValueStep(
+        'Process',
+        `${pd.name} operational cost`,
+        'Welding cost = weld length in meters x welding rate',
+        `${Number(params.weldLength || 0)} mm / 1000 x Rs ${params.weldRate}/m`,
+        formatInr(pd.cost),
+      )];
+    }
+
+    if (name.includes('paint')) {
+      return [singleValueStep(
+        'Process',
+        `${pd.name} operational cost`,
+        'Painting cost = sum of part painting costs',
+        parts.length
+          ? parts.map(part => `Rs ${Number(part.calculated_costs?.painting_cost || 0).toFixed(2)} x ${Number(part.per_set_qty || 1)}`).join(' + ')
+          : `${formatInr(pd.cost)} from costing engine`,
+        formatInr(pd.cost),
+      )];
+    }
+
+    return [singleValueStep(
+      'Process',
+      `${pd.name} operational cost`,
+      'Operational cost = process value returned by costing engine',
+      `${pd.name} cost`,
+      formatInr(pd.cost),
+    )];
+  };
+
+  const processTotalStep = (): CalculationStep[] => {
+    const rows = estimation?.processDetails || [];
+    return [
+      singleValueStep(
+        'Process',
+        'Operational process total',
+        'Operational process total = sum of configured process costs',
+        rows.length ? rows.map(pd => `${pd.name}: ${formatInr(pd.cost)}`).join(' + ') : 'No process rows available',
+        formatInr(estimation?.summary.processCost || 0),
+      ),
+    ];
   };
 
   const allocatedScrapBreakdownSteps = (): CalculationStep[] => {
@@ -2016,17 +2315,10 @@ export default function App() {
 
     return [
       {
-        section: 'Values Used',
-        name: `Numbers used for ${step.name}`,
-        formula: 'The calculation uses the numeric values shown below.',
-        substitutedValues: valueText,
-        result: cleanBreakdownText(step.result),
-      },
-      {
-        section: 'Original Formula',
-        name: 'Formula and values used',
+        section: 'Source',
+        name: step.name.replace(/^Numbers used for\s+/i, ''),
         formula: cleanBreakdownText(step.formula),
-        substitutedValues: cleanBreakdownText(step.substitutedValues),
+        substitutedValues: valueText,
         result: cleanBreakdownText(step.result),
       },
     ];
@@ -2090,29 +2382,63 @@ export default function App() {
     const floorMatches = [...text.matchAll(/floor\(\s*([\d.]+)\s*\/\s*([\d.]+)\s*\)/g)];
     const piecesMatch = text.match(/=\s*(\d+)\s*(?:pieces|parts)/i);
     const leftoverMatch = text.match(/leftover\s*([\d.]+)\s*mm/i);
-    const stockLength = Number(floorMatches[0]?.[1] || (item.stockForm?.toLowerCase().includes('sheet') ? 2500 : 6000));
-    const pieceLength = Number(floorMatches[0]?.[2] || 0);
-    const stockWidth = Number(floorMatches[1]?.[1] || 1250);
-    const pieceWidth = Number(floorMatches[1]?.[2] || 0);
+    const isSheet = (item.stockForm || item.stockSize || text).toLowerCase().includes('sheet') || text.toLowerCase().includes('2500 x 1250');
+    const stockLength = Number(item.stockLengthMm || floorMatches[0]?.[1] || (isSheet ? 2500 : 6000));
+    const pieceLength = Number(item.partLengthMm || floorMatches[0]?.[2] || 0);
+    const stockWidth = Number(item.stockWidthMm || floorMatches[1]?.[1] || (isSheet ? 1250 : 0));
+    const pieceWidth = Number(item.partWidthMm || floorMatches[1]?.[2] || 0);
     return {
       stockLength,
       stockWidth,
       pieceLength,
       pieceWidth,
-      pieces: Number(piecesMatch?.[1] || item.partsPerStock || 1),
-      leftover: Number(leftoverMatch?.[1] || 0),
-      isSheet: (item.stockForm || item.stockSize || text).toLowerCase().includes('sheet') || text.toLowerCase().includes('2500 x 1250'),
+      pieces: Number(item.partsPerStock || piecesMatch?.[1] || 0),
+      leftover: Number(item.leftoverMm ?? leftoverMatch?.[1] ?? 0),
+      isSheet,
+      canCalculate: Number(item.partsPerStock || piecesMatch?.[1] || 0) > 0 && pieceLength > 0,
     };
   };
 
   const renderNestingVisual = (item: EstimateLineItem) => {
     const parsed = parseNestingNumbers(item);
+    const formatYieldPercent = (value: number) => `${Math.max(Math.min(value, 100), 0).toFixed(1)}%`;
+    if (!parsed.canCalculate) {
+      return (
+        <div className="space-y-4">
+          <div className="p-6 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900">
+            Nesting cannot be calculated for this part because the required stock cutting dimensions were not extracted.
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+              <div className="text-[10px] uppercase font-black text-slate-500">Stock type</div>
+              <div className="font-mono font-black">{item.stockForm || '-'}</div>
+            </div>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+              <div className="text-[10px] uppercase font-black text-slate-500">Part length</div>
+              <div className="font-mono font-black">{parsed.pieceLength || '-'} mm</div>
+            </div>
+            <div className="p-3 bg-blue-50 border border-blue-100 rounded">
+              <div className="text-[10px] uppercase font-black text-[#004ccd]">Yield per stock</div>
+              <div className="font-mono font-black">-</div>
+              <div className="mt-1 text-[10px] font-bold text-slate-500">Yield: -</div>
+            </div>
+            <div className="p-3 bg-amber-50 border border-amber-100 rounded">
+              <div className="text-[10px] uppercase font-black text-amber-700">Leftover</div>
+              <div className="font-mono font-black">-</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
     if (parsed.isSheet) {
       const cols = parsed.pieceLength > 0 ? Math.max(Math.floor(parsed.stockLength / parsed.pieceLength), 1) : Math.ceil(Math.sqrt(parsed.pieces));
       const rows = parsed.pieceWidth > 0 ? Math.max(Math.floor(parsed.stockWidth / parsed.pieceWidth), 1) : Math.ceil(parsed.pieces / cols);
       const visibleCols = Math.min(cols, 12);
       const visibleRows = Math.min(rows, 6);
       const shown = visibleCols * visibleRows;
+      const stockArea = parsed.stockLength * parsed.stockWidth;
+      const usedArea = parsed.pieceLength * parsed.pieceWidth * parsed.pieces;
+      const yieldPercent = stockArea > 0 ? (usedArea / stockArea) * 100 : 0;
       return (
         <div className="space-y-4">
           <div className="relative bg-slate-100 border-2 border-slate-900 rounded-lg overflow-hidden aspect-[2/1] shadow-inner">
@@ -2141,6 +2467,7 @@ export default function App() {
             <div className="p-3 bg-blue-50 border border-blue-100 rounded">
               <div className="text-[10px] uppercase font-black text-[#004ccd]">Grid yield</div>
               <div className="font-mono font-black">{cols} x {rows} = {parsed.pieces} parts</div>
+              <div className="mt-1 text-[10px] font-bold text-[#004ccd]">{formatYieldPercent(yieldPercent)} sheet yield</div>
             </div>
             <div className="p-3 bg-amber-50 border border-amber-100 rounded">
               <div className="text-[10px] uppercase font-black text-amber-700">Allocated scrap</div>
@@ -2189,6 +2516,7 @@ export default function App() {
           <div className="p-3 bg-blue-50 border border-blue-100 rounded">
             <div className="text-[10px] uppercase font-black text-[#004ccd]">Yield per stock</div>
             <div className="font-mono font-black">{parsed.pieces} pieces</div>
+            <div className="mt-1 text-[10px] font-bold text-[#004ccd]">{formatYieldPercent(usedPercent)} stock yield</div>
           </div>
           <div className="p-3 bg-amber-50 border border-amber-100 rounded">
             <div className="text-[10px] uppercase font-black text-amber-700">Leftover</div>
@@ -2790,28 +3118,26 @@ export default function App() {
           </nav>
         </div>
 
-        <ExportActions
-          currentScreen={currentScreen}
-          avatarUrl={DEFAULT_AVATAR_URL}
-          showBackToFileList={currentScreen === 'workspace' && batchUploadFiles.length > 0 && isBatchReady}
-          onBackToFileList={() => {
-            setCurrentScreen('landing');
-            setActiveTab('projects');
-            setIsBatchReady(true);
-            setIsBatchScanning(false);
-            setIsAnalyzing(false);
-          }}
-          onLoadSampleOrChangeFile={() => {
-            if (currentScreen === 'landing') {
-              handleSelectSample();
-            } else {
+        {currentScreen === 'workspace' && (
+          <ExportActions
+            currentScreen={currentScreen}
+            avatarUrl={DEFAULT_AVATAR_URL}
+            showBackToFileList={batchUploadFiles.length > 0 && isBatchReady}
+            onBackToFileList={() => {
               setCurrentScreen('landing');
               setActiveTab('projects');
-            }
-          }}
-          onExportReport={handleExport}
-          onExportFormula={handleExportFormula}
-        />
+              setIsBatchReady(true);
+              setIsBatchScanning(false);
+              setIsAnalyzing(false);
+            }}
+            onLoadSampleOrChangeFile={() => {
+              setCurrentScreen('landing');
+              setActiveTab('projects');
+            }}
+            onExportReport={handleExport}
+            onExportFormula={handleExportFormula}
+          />
+        )}
       </header>
 
       {/* Main Content Area */}
@@ -2853,22 +3179,14 @@ export default function App() {
               </p>
 
               {/* Action Buttons */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-xl">
+              <div className="w-full max-w-sm">
                 <button 
-                  className="flex flex-col items-center justify-center gap-2 px-6 py-4 bg-[#004ccd] text-white font-semibold text-xs uppercase tracking-wider rounded shadow hover:bg-[#0f62fe] transition-all active:scale-[0.98]"
+                  className="w-full flex flex-col items-center justify-center gap-2 px-6 py-4 bg-[#004ccd] text-white font-semibold text-xs uppercase tracking-wider rounded shadow hover:bg-[#0f62fe] transition-all active:scale-[0.98]"
                   onClick={() => uploadInputRef.current?.click()}
                 >
                   <Upload className="w-5 h-5" />
                   Upload Drawing Set
                   <span className="text-[10px] normal-case tracking-normal font-medium text-blue-100">Single, multiple files, or ZIP</span>
-                </button>
-                <button 
-                  className="flex flex-col items-center justify-center gap-2 px-6 py-4 bg-white border border-[#c3c6d8] text-slate-800 font-semibold text-xs uppercase tracking-wider rounded hover:bg-slate-50 transition-all active:scale-[0.98]"
-                  onClick={handleSelectSample}
-                >
-                  <CloudDownload className="w-4 h-4 text-slate-600" />
-                  Load Blueprint Template
-                  <span className="text-[10px] normal-case tracking-normal font-medium text-slate-500">Open sample calculation</span>
                 </button>
               </div>
 
@@ -2882,7 +3200,7 @@ export default function App() {
                 onChange={handleUploadInput}
               />
 
-              {batchUploadFiles.length > 0 && isBatchScanning && (
+              {(isUploadExpanding || (batchUploadFiles.length > 0 && isBatchScanning)) && (
                 <div className="mt-8 w-full max-w-6xl overflow-hidden rounded-2xl bg-slate-950 border border-blue-900/60 p-8 text-left shadow-2xl">
                   <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-8">
                     <div>
@@ -2890,10 +3208,16 @@ export default function App() {
                         <Sparkles className="w-3.5 h-3.5" />
                         Motion batch scan
                       </div>
-                      <h3 className="mt-3 text-xl font-black text-white">Scanning uploaded drawing set</h3>
-                      <p className="mt-1 text-xs text-cyan-100/70">Identifying main drawings and child dependency files before extraction.</p>
+                      <h3 className="mt-3 text-xl font-black text-white">
+                        {isUploadExpanding ? 'Preparing uploaded drawing set' : 'Scanning uploaded drawing set'}
+                      </h3>
+                      <p className="mt-1 text-xs text-cyan-100/70">
+                        {isUploadExpanding
+                          ? 'Reading ZIP/multiple files and preparing previews for extraction.'
+                          : 'Identifying main drawings and child dependency files before extraction.'}
+                      </p>
                     </div>
-                    <div className="font-mono text-xs text-cyan-100/80">{batchUploadFiles.length} files queued</div>
+                    <div className="font-mono text-xs text-cyan-100/80">{batchUploadFiles.length || uploadPreparingCount} files queued</div>
                   </div>
 
                   <div className="relative h-[340px] rounded-xl border border-cyan-300/15 bg-slate-900 overflow-hidden">
@@ -2972,7 +3296,9 @@ export default function App() {
                     ))}
 
                     <div className="absolute inset-x-0 bottom-5 text-center font-mono text-[11px] text-cyan-100/80">
-                      Classifying drawing relationships before opening extraction...
+                      {isUploadExpanding
+                        ? 'Expanding files and preparing drawing previews...'
+                        : 'Classifying drawing relationships before opening extraction...'}
                     </div>
                   </div>
                 </div>
@@ -3080,15 +3406,7 @@ export default function App() {
 
               {batchUploadFiles.length > 0 && !isBatchScanning && !isBatchReady && (
                 <div className="mt-8 w-full max-w-7xl text-left bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-4">
-                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-                    <div>
-                      <div className="text-[10px] uppercase font-black tracking-widest text-[#004ccd]">Uploaded file batch</div>
-                      <div className="text-xs text-slate-600 mt-1">
-                        {isBatchDependencyScanning
-                          ? 'Checking each drawing for child/detail references...'
-                          : 'Each uploaded file is listed vertically. Missing dependency files show red; uploaded dependency files show green.'}
-                      </div>
-                    </div>
+                  <div className="flex flex-col md:flex-row md:items-center md:justify-end gap-2">
                     <div className="flex items-center gap-2">
                       {isBatchDependencyScanning && (
                         <span className="text-[10px] uppercase font-black text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
@@ -3582,7 +3900,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  {referencedDrawings.length > 0 && (
+                  {false && referencedDrawings.length > 0 && (
                     <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg shadow-sm">
                       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                         <div className="flex items-start gap-3">
@@ -4589,7 +4907,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Surface Area`, structuredStepsFor(part, ['surface area']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Surface Area`, structuredStepByName(part, 'surface area'))}
                                             >
                                               {part.surface_area_sq_meter.toFixed(4)} m2
                                             </button>
@@ -4599,7 +4917,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Bending`, structuredStepsFor(part, ['bending']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Bends`, structuredStepByName(part, 'bending cost'))}
                                             >
                                               {part.bends_per_part}
                                             </button>
@@ -4612,7 +4930,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-emerald-900`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Weight`, mapStructuredSteps(part.calculation_steps))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Net Finished Weight`, structuredStepByName(part, 'net weight'))}
                                             >
                                               {part.weight_ledger.unit_net_finished_weight_kg.toFixed(3)} kg
                                             </button>
@@ -4622,7 +4940,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-amber-900`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Scrap`, mapStructuredSteps(part.calculation_steps))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Scrap / Waste`, structuredStepByName(part, 'scrap resale value'))}
                                             >
                                               {part.weight_ledger.unit_scrap_waste_weight_kg.toFixed(3)} kg
                                             </button>
@@ -4632,7 +4950,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Gross RM Weight`, structuredStepsFor(part, ['gross rm weight']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Gross RM Weight`, structuredStepByName(part, 'gross rm weight'))}
                                             >
                                               {part.weight_ledger.unit_gross_rm_weight_kg.toFixed(3)} kg
                                             </button>
@@ -4642,7 +4960,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Set Gross Weight`, structuredStepsFor(part, ['gross rm weight']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Set Gross Weight`, setGrossWeightBreakdownSteps(part))}
                                             >
                                               {part.weight_ledger.total_set_gross_weight_kg.toFixed(3)} kg
                                             </button>
@@ -4655,7 +4973,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Laser Cutting`, structuredStepsFor(part, ['laser cutting']))}
+                                            onClick={() => openBreakdown(`Part ${part.part_number} Laser Cutting Length`, laserLengthBreakdownSteps(part))}
                                             >
                                               {part.cutting_metrics.laser_cutting_length_mm} mm
                                             </button>
@@ -4665,7 +4983,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Press Cutting`, structuredStepsFor(part, ['press cutting', 'press / punching']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Press Machine Hits`, structuredStepByName(part, 'press cutting cost'))}
                                             >
                                               {part.cutting_metrics.press_machine_hits_count}
                                             </button>
@@ -4678,7 +4996,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-[#004ccd]`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Material Cost`, mapStructuredSteps(part.calculation_steps))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Material Cost`, structuredStepByName(part, 'material cost'))}
                                             >
                                               {formatInr(part.calculated_costs.material_cost)}
                                             </button>
@@ -4688,7 +5006,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-[#004ccd]`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Laser Cost`, structuredStepsFor(part, ['laser cutting cost']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Laser Cost`, structuredStepByName(part, 'laser cutting cost'))}
                                             >
                                               {formatInr(part.calculated_costs.laser_cutting_cost_estimate)}
                                             </button>
@@ -4698,7 +5016,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Press Cost`, structuredStepsFor(part, ['press cutting cost']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Machine Cost`, structuredStepByName(part, 'press cutting cost'))}
                                             >
                                               {formatInr(part.calculated_costs.machine_punching_cost_estimate)}
                                             </button>
@@ -4708,7 +5026,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Bending + Painting`, structuredStepsFor(part, ['bending cost', 'painting cost']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Bending + Painting`, [...structuredStepByName(part, 'bending cost'), ...structuredStepByName(part, 'painting cost')])}
                                             >
                                               {formatInr(part.calculated_costs.bending_cost)} + {formatInr(part.calculated_costs.painting_cost)}
                                             </button>
@@ -4718,7 +5036,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Single via Laser`, structuredStepsFor(part, ['total via laser']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Single via Laser`, structuredStepByName(part, 'total via laser'))}
                                             >
                                               {formatInr(part.calculated_costs.total_single_part_cost_via_laser)}
                                             </button>
@@ -4728,7 +5046,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Single via Machine`, structuredStepsFor(part, ['total via machine']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Single via Machine`, structuredStepByName(part, 'total via machine'))}
                                             >
                                               {formatInr(part.calculated_costs.total_single_part_cost_via_machine)}
                                             </button>
@@ -4797,12 +5115,12 @@ export default function App() {
                                 <tr>
                                   <td className="p-2.5 font-sans font-medium text-slate-900">Main Profile / Rod ({params.materialForm})</td>
                                   <td className="p-2.5 text-right">
-                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Main Profile Weight', [estimation.items?.[0]?.formulas?.weight])}>
+                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Main Profile Weight', itemWeightStep(estimation.items?.[0]))}>
                                       {estimation.summary.profileWeightKg.toFixed(3)} kg
                                     </button>
                                   </td>
                                   <td className="p-2.5 text-right">
-                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Main Profile Total Weight', [estimation.items?.[0]?.formulas?.weight])}>
+                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Main Profile Total Weight', projectWeightStep('Main profile', estimation.summary.profileWeightKg, estimation.summary.qty))}>
                                       {(estimation.summary.profileWeightKg * estimation.summary.qty).toFixed(3)} kg
                                     </button>
                                   </td>
@@ -4811,12 +5129,12 @@ export default function App() {
                                   <tr>
                                     <td className="p-2.5 font-sans font-medium text-slate-900">Top Inlay Plate</td>
                                     <td className="p-2.5 text-right">
-                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Top Plate Weight', [estimation.items?.find(item => item.name.toLowerCase().includes('top'))?.formulas?.weight])}>
+                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Top Plate Weight', itemWeightStep(estimation.items?.find(item => item.name.toLowerCase().includes('top'))))}>
                                         {estimation.summary.topPlateWeightKg.toFixed(3)} kg
                                       </button>
                                     </td>
                                     <td className="p-2.5 text-right">
-                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Top Plate Total Weight', [estimation.items?.find(item => item.name.toLowerCase().includes('top'))?.formulas?.weight])}>
+                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Top Plate Total Weight', projectWeightStep('Top plate', estimation.summary.topPlateWeightKg, estimation.summary.qty))}>
                                         {(estimation.summary.topPlateWeightKg * estimation.summary.qty).toFixed(3)} kg
                                       </button>
                                     </td>
@@ -4826,12 +5144,12 @@ export default function App() {
                                   <tr>
                                     <td className="p-2.5 font-sans font-medium text-slate-900">Bottom Support Plate</td>
                                     <td className="p-2.5 text-right">
-                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Bottom Plate Weight', [estimation.items?.find(item => item.name.toLowerCase().includes('bottom'))?.formulas?.weight])}>
+                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Bottom Plate Weight', itemWeightStep(estimation.items?.find(item => item.name.toLowerCase().includes('bottom'))))}>
                                         {estimation.summary.bottomPlateWeightKg.toFixed(3)} kg
                                       </button>
                                     </td>
                                     <td className="p-2.5 text-right">
-                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Bottom Plate Total Weight', [estimation.items?.find(item => item.name.toLowerCase().includes('bottom'))?.formulas?.weight])}>
+                                      <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Bottom Plate Total Weight', projectWeightStep('Bottom plate', estimation.summary.bottomPlateWeightKg, estimation.summary.qty))}>
                                         {(estimation.summary.bottomPlateWeightKg * estimation.summary.qty).toFixed(3)} kg
                                       </button>
                                     </td>
@@ -4840,12 +5158,12 @@ export default function App() {
                                 <tr className="bg-slate-50 font-bold text-slate-900">
                                   <td className="p-2.5 font-sans">Accumulated Material Total</td>
                                   <td className="p-2.5 text-right">
-                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Accumulated Material Weight', estimation.items?.map(item => item.formulas?.weight) || [])}>
+                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Accumulated Material Weight', accumulatedUnitWeightStep())}>
                                       {estimation.summary.unitWeightKg.toFixed(3)} kg
                                     </button>
                                   </td>
                                   <td className="p-2.5 text-right">
-                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Total Material Weight', estimation.items?.map(item => item.formulas?.weight) || [])}>
+                                    <button type="button" className={valueButtonClass} onClick={() => openBreakdown('Total Material Weight', accumulatedProjectWeightStep())}>
                                       {estimation.summary.totalWeightKg.toFixed(3)} kg
                                     </button>
                                   </td>
@@ -4876,19 +5194,19 @@ export default function App() {
                                       <td className="p-2.5 font-sans font-medium text-slate-900">{item.name}</td>
                                       <td className="p-2.5 text-right">{item.quantity}</td>
                                       <td className="p-2.5 text-right">
-                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Weight`, [item.formulas?.weight])}>
+                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Weight`, itemWeightStep(item))}>
                                           {item.weightKg.toFixed(3)} kg
                                         </button>
                                       </td>
                                       <td className="p-2.5 text-right">
-                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Material Cost`, [item.formulas?.material])}>
+                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Material Cost`, itemMaterialCostStep(item))}>
                                           {formatInr(item.materialCost)}
                                         </button>
                                       </td>
                                       <td className="p-2.5 text-right">{item.partsPerStock ? `${item.partsPerStock}/${item.stockForm}` : '-'}</td>
                                       <td className="p-2.5 text-right">
                                         {item.scrapWeightKg ? (
-                                          <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Scrap`, [findCalculationStep('Scrap value')])}>
+                                          <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${item.name} Scrap`, itemScrapBreakdownSteps(item))}>
                                             {item.scrapWeightKg.toFixed(3)} kg ({formatInr(item.scrapValue || 0)})
                                           </button>
                                         ) : '-'}
@@ -4946,12 +5264,12 @@ export default function App() {
                                     <tr key={idx}>
                                       <td className="p-2.5 font-sans font-medium text-slate-900">{pd.name}</td>
                                       <td className="p-2.5 text-right">
-                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${pd.name} Cost`, [findProcessStep(pd.name)])}>
+                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${pd.name} Base / Unit`, processBaseStep(pd))}>
                                           {formatInr(pd.unitCost)}
                                         </button>
                                       </td>
                                       <td className="p-2.5 text-right font-bold text-slate-900">
-                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${pd.name} Cost`, [findProcessStep(pd.name)])}>
+                                        <button type="button" className={valueButtonClass} onClick={() => openBreakdown(`${pd.name} Cost`, processCostStep(pd))}>
                                           {formatInr(pd.cost)}
                                         </button>
                                       </td>
@@ -4964,7 +5282,7 @@ export default function App() {
                                       <button
                                         type="button"
                                         className={valueButtonClass}
-                                        onClick={() => openBreakdown('Operational Process Total', estimation.processDetails.map(pd => findProcessStep(pd.name)))}
+                                        onClick={() => openBreakdown('Operational Process Total', processTotalStep())}
                                       >
                                         {formatInr(estimation.summary.processCost)}
                                       </button>
