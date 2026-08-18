@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 const API_BASE = process.env.COST_ESTIMATOR_API_BASE || 'http://127.0.0.1:8010';
 
+// Converts a browser data URL into a File for backend upload.
 function dataUrlToFile(dataUrl: string, filename = 'uploaded-diagram'): File {
   const [header, base64] = dataUrl.split(',');
   const mimeMatch = header.match(/data:(.*?);base64/);
@@ -10,6 +11,7 @@ function dataUrlToFile(dataUrl: string, filename = 'uploaded-diagram'): File {
   return new File([binary], filename, { type: mimeType });
 }
 
+// API route that handles POST requests for this endpoint.
 export async function POST(request: Request) {
   try {
     const body = await request.json();

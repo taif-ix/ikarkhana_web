@@ -9,5 +9,13 @@ const SAMPLE_DEPENDENCY_FALLBACKS: Record<string, string[]> = {
   ls10270_a: ['LS10246.tif', 'MDG0008.tif'],
 };
 
-export const dependencyFallbacksFor = (drawingBase: string) =>
-  SAMPLE_DEPENDENCY_FALLBACKS[drawingBase] || [];
+// Returns sample child drawing hints only when AI reference scan returns no hints.
+export const dependencyFallbacksFor = (drawingBase: string) => {
+  const fallbackFiles = SAMPLE_DEPENDENCY_FALLBACKS[drawingBase];
+
+  if (fallbackFiles) {
+    return fallbackFiles;
+  }
+
+  return [];
+};

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 const API_BASE = process.env.COST_ESTIMATOR_API_BASE || 'http://127.0.0.1:8010';
 
+// API route that handles POST requests for this endpoint.
 export async function POST(request: Request) {
   try {
     const body = await request.json();

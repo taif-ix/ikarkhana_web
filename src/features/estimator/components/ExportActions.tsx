@@ -10,6 +10,7 @@ type ExportActionsProps = {
   showBackToFileList: boolean;
 };
 
+// Renders the export actions UI section.
 export function ExportActions({
   currentScreen,
   avatarUrl,

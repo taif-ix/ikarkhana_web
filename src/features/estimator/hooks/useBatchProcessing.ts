@@ -20,8 +20,10 @@ type UseBatchProcessingArgs = {
   batchDependencyHints: Record<string, string[]>;
 };
 
+// Waits for a short delay between batch status polls.
 const wait = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
 
+// Manages backend batch processing, polling, and retry actions.
 export function useBatchProcessing({
   setBatchProcessingResults,
   applyBackendBatchJob,
@@ -32,7 +34,8 @@ export function useBatchProcessing({
 }: UseBatchProcessingArgs) {
   const [batchJobId, setBatchJobId] = useState('');
 
-  const runBatchExtractionForMainFiles = async (files: BatchUploadFile[], hintsMap: Record<string, string[]>) => {
+  // Starts batch extraction for every uploaded drawing file.
+  const runBatchExtractionForFiles = async (files: BatchUploadFile[], hintsMap: Record<string, string[]>) => {
     const filesToProcess = files;
     setBatchProcessingResults(Object.fromEntries(filesToProcess.map(file => [
       file.name,
@@ -80,6 +83,7 @@ export function useBatchProcessing({
     }
   };
 
+  // Handles retry batch file.
   const retryBatchFile = async (file: BatchUploadFile, event?: MouseEvent) => {
     event?.stopPropagation();
     setBatchProcessingResults(prev => ({
@@ -128,7 +132,7 @@ export function useBatchProcessing({
 
   return {
     batchJobId,
-    runBatchExtractionForMainFiles,
+    runBatchExtractionForFiles,
     retryBatchFile,
   };
 }

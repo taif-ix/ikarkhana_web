@@ -2,15 +2,35 @@ import { NextResponse } from 'next/server';
 
 const API_BASE = process.env.COST_ESTIMATOR_API_BASE || 'http://127.0.0.1:8010';
 
+// Converts unknown values into safe strings.
 function asString(value: unknown, fallback = '') {
-  return value === undefined || value === null || value === '' ? fallback : String(value);
+  if (value === undefined) {
+    return fallback;
+  }
+
+  if (value === null) {
+    return fallback;
+  }
+
+  if (value === '') {
+    return fallback;
+  }
+
+  return String(value);
 }
 
+// Converts unknown values into safe non-negative numbers.
 function asNonNegativeNumber(value: unknown, fallback = 0) {
   const parsed = Number(asString(value, String(fallback)));
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return parsed;
+  }
+
+  return fallback;
 }
 
+// Builds the structured costing payload sent to the backend.
 function costPayload(params: any, extraction: any) {
   return {
     extraction,
@@ -25,21 +45,29 @@ function costPayload(params: any, extraction: any) {
   };
 }
 
+// Converts a browser data URL into a File for backend upload.
 function dataUrlToFile(dataUrl: string, filename = 'uploaded-diagram') {
   const [header, base64] = dataUrl.split(',');
   const mimeMatch = header.match(/data:(.*?);base64/);
-  const mimeType = mimeMatch?.[1] || 'application/octet-stream';
+  let mimeType = 'application/octet-stream';
+  if (mimeMatch && mimeMatch[1]) {
+    mimeType = mimeMatch[1];
+  }
   const binary = Buffer.from(base64 || '', 'base64');
   return new File([binary], filename, { type: mimeType });
 }
 
+// API route that handles POST requests for this endpoint.
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const image = String(body.image || '');
     const params = body.params || {};
     const extraction = body.extraction || body.structuredBreakdown || body.structuredExtraction;
-    const childDrawings = Array.isArray(body.childDrawings) ? body.childDrawings : [];
+    let childDrawings = [];
+    if (Array.isArray(body.childDrawings)) {
+      childDrawings = body.childDrawings;
+    }
 
     if (extraction && childDrawings.length === 0) {
       const response = await fetch(`${API_BASE}/calculate-cost-breakdown`, {
@@ -100,3 +128,4 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
+

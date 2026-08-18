@@ -9,6 +9,7 @@ type SectionShellProps = {
   actions?: ReactNode;
 };
 
+// Renders the section shell UI section.
 export function SectionShell({ title, eyebrow, children, actions }: SectionShellProps) {
   return (
     <section className="space-y-3">

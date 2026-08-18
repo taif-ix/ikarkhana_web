@@ -12,6 +12,7 @@ type NestingVisualModalProps = {
   nestingValueBreakdownSteps: (item: EstimateLineItem, valueType: 'weight' | 'scrapWeight' | 'scrapValue') => CalculationStep[];
 };
 
+// Renders the nesting visual modal UI section.
 export function NestingVisualModal({
   item,
   onClose,

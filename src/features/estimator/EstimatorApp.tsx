@@ -36,13 +36,13 @@ import {
 } from 'lucide-react';
 import { DEFAULT_AVATAR_URL, DEFAULT_IMAGE_URL } from '../../constants/assets';
 import { formatInr } from '../../lib/formatters';
-import { dependencyFallbacksFor } from './lib/dependencyFallbacks';
 import {
   CalculationBreakdownModal,
   ExportActions,
   NestingVisualModal,
 } from './components';
 import { useBatchProcessing } from './hooks/useBatchProcessing';
+import { dependencyFallbacksFor } from './lib/dependencyFallbacks';
 import { downloadTextFile, numberSafe as excelNumberSafe, safe as excelSafe, xmlEscape as excelXmlEscape } from './lib/excelXml';
 import type { BackendBatchFileResult, BatchProcessingResult, BatchUploadFile } from '../../types/batch';
 import type {
@@ -50,10 +50,12 @@ import type {
   EstimateLineItem,
   EstimationResult,
   PlateParams,
+  ReferencedDrawing,
   StructuredBreakdown,
   TechnicalParams,
 } from '../../types/costing';
 
+// Coordinates the full estimator workflow and screen state.
 export default function App() {
   // Navigation: 'landing' or 'workspace'
   const [currentScreen, setCurrentScreen] = useState<'landing' | 'workspace'>('landing');
@@ -68,6 +70,7 @@ export default function App() {
   const [uploadedImageData, setUploadedImageData] = useState<string>('');
   const [uploadedImageName, setUploadedImageName] = useState<string>('');
   const [structuredBreakdownCache, setStructuredBreakdownCache] = useState<StructuredBreakdown | null>(null);
+  const [singleFileReferencedDrawings, setSingleFileReferencedDrawings] = useState<ReferencedDrawing[]>([]);
   const [batchUploadFiles, setBatchUploadFiles] = useState<BatchUploadFile[]>([]);
   const [selectedBatchParentName, setSelectedBatchParentName] = useState<string>('');
   const [isUploadExpanding, setIsUploadExpanding] = useState(false);
@@ -152,13 +155,36 @@ export default function App() {
   ]);
 
   // Toast notifications
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<{
+    title: string;
+    message: string;
+    kind: 'info' | 'success' | 'warning' | 'error';
+  } | null>(null);
 
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
-  const triggerToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+  // Returns true when backend rejected a file before AI extraction.
+  const isUploadValidationError = (message: string) => {
+    const lowerMessage = message.toLowerCase();
+    return (
+      lowerMessage.includes('technical engineering drawing') ||
+      lowerMessage.includes('unsupported file type') ||
+      lowerMessage.includes('uploaded image looks blank') ||
+      lowerMessage.includes('corrupt') ||
+      lowerMessage.includes('too small') ||
+      lowerMessage.includes('readable engineering drawing')
+    );
+  };
+
+  // Shows a short user-facing notification.
+  const triggerToast = (
+    msg: string,
+    kind: 'info' | 'success' | 'warning' | 'error' = 'info',
+    title?: string,
+  ) => {
+    const fallbackTitle = kind === 'error' ? 'Action needed' : kind === 'success' ? 'Done' : kind === 'warning' ? 'Check this' : 'Notice';
+    setToastMessage({ title: title || fallbackTitle, message: msg, kind });
+    window.setTimeout(() => setToastMessage(null), kind === 'error' ? 7000 : 3500);
   };
 
   // Drag & drop handlers
@@ -172,6 +198,7 @@ export default function App() {
     }
   };
 
+  // Handles drop user action.
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -182,6 +209,7 @@ export default function App() {
     }
   };
 
+  // Handles upload input user action.
   const handleUploadInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(e.target.files || []);
     if (selectedFiles.length > 0) {
@@ -190,6 +218,7 @@ export default function App() {
     e.target.value = '';
   };
 
+  // Handles read file as data url.
   const readFileAsDataUrl = (file: File) =>
     new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -198,35 +227,61 @@ export default function App() {
       reader.readAsDataURL(file);
     });
 
+  // Handles drawing base.
   const drawingBase = (name: string) => name.toLowerCase().replace(/\.[^.]+$/, '').trim();
 
   const DEPENDENCY_SCAN_CONCURRENCY = 3;
 
+  // Scans one file for child/detail drawing references.
+  const scanReferencesForFile = async (file: BatchUploadFile): Promise<ReferencedDrawing[]> => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 18000);
+    try {
+      const response = await fetch('/api/reference-scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, image: file.image }),
+        signal: controller.signal,
+      });
+      const result = await response.json();
+      return Array.isArray(result?.data?.referenced_drawings) ? result.data.referenced_drawings : [];
+    } catch {
+      return [];
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  };
+
+  // Converts child/detail references into file-name hints.
+  const hintsFromReferences = (references: ReferencedDrawing[]) => {
+    const hints: string[] = [];
+
+    references.forEach((reference) => {
+      let hint = '';
+
+      if (reference.file_name_hint) {
+        hint = String(reference.file_name_hint).trim();
+      } else if (reference.drawing_number) {
+        hint = `${reference.drawing_number}.tif`.trim();
+      }
+
+      if (hint && hint !== '.tif' && !hints.includes(hint)) {
+        hints.push(hint);
+      }
+    });
+
+    return hints;
+  };
+
+  // Scans dependency hints for files.
   const scanDependencyHintsForFiles = async (files: BatchUploadFile[]) => {
     const scannedHints: Record<string, string[]> = {};
 
+    // Scans one file.
     const scanOneFile = async (file: BatchUploadFile) => {
       const key = drawingBase(file.name);
-      const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => controller.abort(), 18000);
-      try {
-        const response = await fetch('/api/reference-scan', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: file.name, image: file.image }),
-          signal: controller.signal,
-        });
-        const result = await response.json();
-        const references = Array.isArray(result?.data?.referenced_drawings) ? result.data.referenced_drawings : [];
-        const hints = references
-          .map((reference: any) => String(reference.file_name_hint || `${reference.drawing_number || ''}.tif`).trim())
-          .filter((hint: string) => hint && hint !== '.tif');
-        scannedHints[key] = Array.from(new Set(hints));
-      } catch {
-        scannedHints[key] = [];
-      } finally {
-        window.clearTimeout(timeoutId);
-      }
+      const references = await scanReferencesForFile(file);
+      scannedHints[key] = hintsFromReferences(references);
 
       setBatchDependencyHints(prev => ({
         ...prev,
@@ -250,7 +305,9 @@ export default function App() {
     return scannedHints;
   };
 
+  // Handles stage normalized files.
   const stageNormalizedFiles = (staged: BatchUploadFile[]) => {
+    setSingleFileReferencedDrawings([]);
     setBatchUploadFiles(staged);
     setSelectedBatchParentName(staged[0]?.name || '');
     setIsBatchReady(false);
@@ -258,13 +315,14 @@ export default function App() {
     setBatchDependencyHints({});
     setBatchProcessingResults({});
     setCurrentScreen('landing');
-    triggerToast(`${staged.length} file${staged.length > 1 ? 's' : ''} staged. Review parent/child files, then proceed.`);
+    triggerToast(`${staged.length} file${staged.length > 1 ? 's' : ''} staged. Review drawing/child files, then proceed.`);
     setIsBatchDependencyScanning(true);
     scanDependencyHintsForFiles(staged)
       .then((hints) => setBatchDependencyHints(hints))
       .finally(() => setIsBatchDependencyScanning(false));
   };
 
+  // Handles uploaded files user action.
   const handleUploadedFiles = async (files: File[]) => {
     setIsUploadExpanding(true);
     setUploadPreparingCount(files.length);
@@ -294,8 +352,10 @@ export default function App() {
       }
 
       if (staged.length === 1) {
+        const references = await scanReferencesForFile(staged[0]);
+        setSingleFileReferencedDrawings(references);
         setIsUploadExpanding(false);
-        await startExtractionFromData(staged[0].image, staged[0].name, staged[0].sizeMb);
+        await startExtractionFromData(staged[0].image, staged[0].name, staged[0].sizeMb, [], references);
         return;
       }
 
@@ -308,6 +368,7 @@ export default function App() {
     }
   };
 
+  // Handles proceed with uploaded files.
   const proceedWithUploadedFiles = async () => {
     if (batchUploadFiles.length === 0) {
       triggerToast('Upload at least one drawing file first.');
@@ -331,44 +392,61 @@ export default function App() {
     setIsBatchScanning(false);
     setIsBatchReady(true);
     triggerToast('Batch scan complete. Extracting and costing files one by one.');
-    void runBatchExtractionForMainFiles(batchUploadFiles, hints);
+    void runBatchExtractionForFiles(batchUploadFiles, hints);
   };
 
   /*
     Batch dependency detection is AI driven:
     Gemini pre-scan fills batchDependencyHints for each uploaded file.
   */
+  // Handles expected child file hints.
   const expectedChildFileHints = (parentName: string) => {
     const key = drawingBase(parentName);
     if (!Object.prototype.hasOwnProperty.call(batchDependencyHints, key)) {
       return [];
     }
     const aiHints = batchDependencyHints[key] || [];
-    return Array.from(new Set(aiHints.length > 0 ? aiHints : dependencyFallbacksFor(key)));
+    let hintsToUse = aiHints;
+
+    if (aiHints.length === 0) {
+      hintsToUse = dependencyFallbacksFor(key);
+    }
+
+    return Array.from(new Set(hintsToUse));
   };
 
+  // Handles expected child file hints from map.
   const expectedChildFileHintsFromMap = (parentName: string, hintsMap: Record<string, string[]>) => {
     const key = drawingBase(parentName);
     if (!Object.prototype.hasOwnProperty.call(hintsMap, key)) {
       return [];
     }
     const aiHints = hintsMap[key] || [];
-    return Array.from(new Set(aiHints.length > 0 ? aiHints : dependencyFallbacksFor(key)));
+    let hintsToUse = aiHints;
+
+    if (aiHints.length === 0) {
+      hintsToUse = dependencyFallbacksFor(key);
+    }
+
+    return Array.from(new Set(hintsToUse));
   };
 
-  const fileMatchesHint = (file: BatchUploadFile, hint: string) =>
-    drawingBase(file.name) === drawingBase(hint);
+  // Handles file matches hint.
+  const fileMatchesHint = (file: BatchUploadFile, hint: string) => {
+    return drawingBase(file.name) === drawingBase(hint);
+  };
 
+  // Handles expected child base set for batch.
   const expectedChildBaseSetForBatch = () => new Set(
     batchUploadFiles.flatMap(file => expectedChildFileHints(file.name).map(hint => drawingBase(hint)))
   );
 
-  const mainBatchFiles = () => {
-    const expectedChildBases = expectedChildBaseSetForBatch();
-    const mainFiles = batchUploadFiles.filter(file => !expectedChildBases.has(drawingBase(file.name)));
-    return mainFiles.length > 0 ? mainFiles : batchUploadFiles;
+  // Returns every uploaded drawing because each file gets its own calculation result.
+  const batchFilesForCalculation = () => {
+    return batchUploadFiles;
   };
 
+  // Handles child files for parent.
   const childFilesForParent = (parent: BatchUploadFile) => {
     const hints = expectedChildFileHints(parent.name);
     return hints
@@ -376,6 +454,7 @@ export default function App() {
       .filter(Boolean) as BatchUploadFile[];
   };
 
+  // Handles child files for parent from map.
   const childFilesForParentFromMap = (parent: BatchUploadFile, files: BatchUploadFile[], hintsMap: Record<string, string[]>) => {
     const hints = expectedChildFileHintsFromMap(parent.name, hintsMap);
     return hints
@@ -383,17 +462,18 @@ export default function App() {
       .filter(Boolean) as BatchUploadFile[];
   };
 
+  // Handles missing child hints for file.
   const missingChildHintsForFile = (parent: BatchUploadFile, files: BatchUploadFile[], hintsMap: Record<string, string[]>) =>
     expectedChildFileHintsFromMap(parent.name, hintsMap).filter(hint => (
       !files.some(file => file.name !== parent.name && drawingBase(file.name) === drawingBase(hint))
     ));
 
-  const mainBatchFilesFromMap = (files: BatchUploadFile[], hintsMap: Record<string, string[]>) => {
-    const expectedChildBases = new Set(files.flatMap(file => expectedChildFileHintsFromMap(file.name, hintsMap).map(hint => drawingBase(hint))));
-    const mainFiles = files.filter(file => !expectedChildBases.has(drawingBase(file.name)));
-    return mainFiles.length > 0 ? mainFiles : files;
+  // Returns every uploaded drawing from a batch because each file is processed separately.
+  const batchFilesForCalculationFromMap = (files: BatchUploadFile[], hintsMap: Record<string, string[]>) => {
+    return files;
   };
 
+  // Handles map backend child files.
   const mapBackendChildFiles = (childFiles?: BackendBatchFileResult['child_files']) =>
     (childFiles || []).map(child => ({
       name: child.file_name,
@@ -547,6 +627,7 @@ export default function App() {
     };
   };
 
+  // Handles apply backend batch job.
   const applyBackendBatchJob = (job: any) => {
     const files = Array.isArray(job?.files) ? job.files as BackendBatchFileResult[] : [];
     const uploadByName = new Map(batchUploadFiles.map(file => [file.name, file]));
@@ -578,6 +659,7 @@ export default function App() {
     }));
   };
 
+  // Handles process single batch file.
   const processSingleBatchFile = async (parent: BatchUploadFile, files: BatchUploadFile[], hintsMap: Record<string, string[]>) => {
       const childFiles = childFilesForParentFromMap(parent, files, hintsMap);
       setBatchProcessingResults(prev => ({
@@ -621,22 +703,17 @@ export default function App() {
           structuredBreakdown = undefined;
         }
 
-        const estimateResponse = await fetch('/api/estimate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(extractedParams),
-        });
-        const estimateResult = await estimateResponse.json();
-        if (!estimateResult.success) {
-          throw new Error(estimateResult.error || 'Cost calculation failed');
+        if (!structuredBreakdown) {
+          throw new Error('Structured cost calculation failed');
         }
 
+        const nextEstimation = estimationFromStructuredBreakdown(structuredBreakdown, parent, childFiles);
         setBatchProcessingResults(prev => ({
           ...prev,
           [parent.name]: {
             status: 'processed',
             params: extractedParams,
-            estimation: { ...estimateResult, structuredBreakdown },
+            estimation: nextEstimation,
             structuredBreakdown,
             childFiles,
           },
@@ -654,7 +731,7 @@ export default function App() {
       }
   };
 
-  const { runBatchExtractionForMainFiles, retryBatchFile } = useBatchProcessing({
+  const { runBatchExtractionForFiles, retryBatchFile } = useBatchProcessing({
     setBatchProcessingResults,
     applyBackendBatchJob,
     childFilesForParentFromMap,
@@ -663,7 +740,8 @@ export default function App() {
     batchDependencyHints,
   });
 
-  const openMainBatchFile = async (parent: BatchUploadFile) => {
+  // Opens main batch file in the workspace.
+  const openBatchFile = async (parent: BatchUploadFile) => {
     const cached = batchProcessingResults[parent.name];
     if (cached?.status === 'processed' && cached.params && cached.estimation) {
       const childFiles = cached.childFiles || childFilesForParent(parent);
@@ -694,6 +772,7 @@ export default function App() {
     await startExtractionFromData(parent.image, parent.name, parent.sizeMb, childFiles);
   };
 
+  // Handles append child files to batch.
   const appendChildFilesToBatch = async (files: File[]) => {
     if (files.length === 0) return;
     try {
@@ -764,6 +843,7 @@ export default function App() {
     name: string,
     size: string,
     childFiles: BatchUploadFile[] = [],
+    preScannedReferences: ReferencedDrawing[] = [],
   ) => {
     setFileName(name);
     setFileSize(size);
@@ -775,6 +855,7 @@ export default function App() {
     setIsExtractionComplete(false);
     setEstimation(null);
     setStructuredBreakdownCache(null);
+    setSingleFileReferencedDrawings(preScannedReferences);
     setAllowMissingChildDrawings(childFiles.length > 0);
     setUploadedImageData(base64String);
     setUploadedImageName(name);
@@ -802,6 +883,9 @@ export default function App() {
     setIsExtractionComplete(false);
     setEstimation(null);
     setStructuredBreakdownCache(null);
+    if (batchChildFiles.length > 0) {
+      setSingleFileReferencedDrawings([]);
+    }
     if (batchChildFiles.length === 0) {
       setChildDrawingUploads({});
       setChildDrawingImages({});
@@ -810,6 +894,7 @@ export default function App() {
     setCurrentScreen('workspace');
     setActiveTab('estimator');
     setSidebarTab('estimator');
+    let extractionWasRejected = false;
     const scanDelay = new Promise<void>((resolve) => {
       window.setTimeout(() => {
         setScanPreviewPhase('reference');
@@ -859,7 +944,16 @@ export default function App() {
         throw new Error(result.error);
       }
     } catch (err: any) {
-      triggerToast('Parameter extraction service failed. Loaded sample blueprint layout.');
+      const errorMessage = err?.message || 'Parameter extraction service failed.';
+      if (isUploadValidationError(errorMessage)) {
+        extractionWasRejected = true;
+        setEstimation(null);
+        setStructuredBreakdownCache(null);
+        triggerToast(errorMessage, 'error', 'Upload rejected');
+        return;
+      }
+
+      triggerToast('Parameter extraction service failed. Loaded sample blueprint layout.', 'warning', 'Extraction fallback loaded');
       // fallback in case of strict network failure
       setParams({
         partName: 'Chassis_Bracket_A102',
@@ -901,7 +995,7 @@ export default function App() {
     } finally {
       await scanDelay;
       setIsAnalyzing(false);
-      setIsExtractionComplete(true);
+      setIsExtractionComplete(!extractionWasRejected);
     }
   };
 
@@ -910,12 +1004,21 @@ export default function App() {
     runExtractionPipeline(filePreview, fileName || 'Manual_Extract_Drawing.dwg');
   };
 
-  const referencedDrawings = structuredBreakdownCache?.referenced_drawings || estimation?.structuredBreakdown?.referenced_drawings || [];
+  const referencedDrawings = (() => {
+    const merged = [...singleFileReferencedDrawings, ...(structuredBreakdownCache?.referenced_drawings || estimation?.structuredBreakdown?.referenced_drawings || [])];
+    const byNumber = new Map<string, ReferencedDrawing>();
+    merged.forEach((drawing) => {
+      const key = drawing.drawing_number || drawing.file_name_hint || JSON.stringify(drawing);
+      if (!byNumber.has(key)) byNumber.set(key, drawing);
+    });
+    return Array.from(byNumber.values());
+  })();
   const missingReferencedDrawings = referencedDrawings.filter(
     (drawing) => drawing.required_for_costing !== false && !childDrawingUploads[drawing.drawing_number]
   );
   const hasBlockingMissingChildDrawings = false;
 
+  // Handles child drawing upload user action.
   const handleChildDrawingUpload = (drawingNumber: string, file?: File | null) => {
     if (!file) return;
     const reader = new FileReader();
@@ -933,89 +1036,84 @@ export default function App() {
   const calculateCost = async () => {
     setIsCalculating(true);
     try {
-      const response = await fetch('/api/estimate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params)
-      });
-      const result = await response.json();
-      if (result.success) {
-        let structuredBreakdown: StructuredBreakdown | undefined;
-        let structuredError: string | undefined;
+      const cachedStructured = structuredBreakdownCache || estimation?.structuredBreakdown;
+      const attachedChildDrawings = Object.entries(childDrawingImages).map(([drawingNumber, image]) => ({
+        drawingNumber,
+        filename: childDrawingUploads[drawingNumber] || `${drawingNumber}.tif`,
+        image,
+      }));
+      const attachedChildFiles: BatchUploadFile[] = attachedChildDrawings.map(drawing => ({
+        name: drawing.filename,
+        sizeMb: '0 MB',
+        image: drawing.image,
+        isChild: true,
+      }));
 
-        const cachedStructured = structuredBreakdownCache || estimation?.structuredBreakdown;
-        const attachedChildDrawings = Object.entries(childDrawingImages).map(([drawingNumber, image]) => ({
-          drawingNumber,
-          filename: childDrawingUploads[drawingNumber] || `${drawingNumber}.tif`,
-          image,
-        }));
-
-        if (cachedStructured && attachedChildDrawings.length === 0) {
-          try {
-            const structuredResponse = await fetch('/api/structured-estimate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                extraction: cachedStructured,
-                params,
-              }),
-            });
-            const structuredResult = await structuredResponse.json();
-            if (structuredResult.success) {
-              structuredBreakdown = structuredResult.data;
-              setStructuredBreakdownCache(structuredResult.data);
-            } else {
-              structuredError = structuredResult.error || 'Structured JSON breakdown failed.';
-            }
-          } catch (error: any) {
-            structuredError = error.message || 'Structured JSON breakdown failed.';
-          }
-        } else if (uploadedImageData) {
-          try {
-            const structuredResponse = await fetch('/api/structured-estimate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                image: uploadedImageData,
-                filename: uploadedImageName || fileName || 'uploaded-diagram',
-                childDrawings: attachedChildDrawings,
-                params,
-              }),
-            });
-            const structuredResult = await structuredResponse.json();
-            if (structuredResult.success) {
-              structuredBreakdown = structuredResult.data;
-              setStructuredBreakdownCache(structuredResult.data);
-            } else {
-              structuredError = structuredResult.error || 'Structured JSON breakdown failed.';
-            }
-          } catch (error: any) {
-            structuredError = error.message || 'Structured JSON breakdown failed.';
-          }
+      let structuredBreakdown: StructuredBreakdown | undefined;
+      if (cachedStructured && attachedChildDrawings.length === 0) {
+        const structuredResponse = await fetch('/api/structured-estimate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            extraction: cachedStructured,
+            params,
+          }),
+        });
+        const structuredResult = await structuredResponse.json();
+        if (!structuredResult.success) {
+          throw new Error(structuredResult.error || 'Structured JSON breakdown failed.');
         }
-
-        setEstimation({ ...result, structuredBreakdown, structuredError });
-        triggerToast('Cost estimate successfully calculated!');
-        
-        // Add to history
-        const newEst = {
-          id: 'EST-' + Math.floor(1000 + Math.random() * 9000),
-          partName: params.partName || 'Unnamed Part',
-          date: new Date().toISOString().split('T')[0],
-          cost: result.summary.totalCost,
-          weight: result.summary.totalWeightKg
-        };
-        setHistory(prev => [newEst, ...prev]);
+        structuredBreakdown = structuredResult.data;
+      } else if (uploadedImageData) {
+        const structuredResponse = await fetch('/api/structured-estimate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            image: uploadedImageData,
+            filename: uploadedImageName || fileName || 'uploaded-diagram',
+            childDrawings: attachedChildDrawings,
+            params,
+          }),
+        });
+        const structuredResult = await structuredResponse.json();
+        if (!structuredResult.success) {
+          throw new Error(structuredResult.error || 'Structured JSON breakdown failed.');
+        }
+        structuredBreakdown = structuredResult.data;
       } else {
-        triggerToast('Error calculating cost: ' + result.error);
+        throw new Error('Upload or extract a drawing before calculating cost.');
       }
+
+      if (!structuredBreakdown) {
+        throw new Error('Structured cost calculation failed.');
+      }
+
+      setStructuredBreakdownCache(structuredBreakdown);
+      const sourceFile: BatchUploadFile = {
+        name: uploadedImageName || fileName || 'uploaded-diagram',
+        sizeMb: fileSize || '0 MB',
+        image: uploadedImageData || filePreview,
+        isChild: false,
+      };
+      const nextEstimation = estimationFromStructuredBreakdown(structuredBreakdown, sourceFile, attachedChildFiles);
+      setEstimation(nextEstimation);
+      triggerToast('Cost estimate successfully calculated!');
+
+      const newEst = {
+        id: 'EST-' + Math.floor(1000 + Math.random() * 9000),
+        partName: params.partName || structuredBreakdown.part_name || 'Unnamed Part',
+        date: new Date().toISOString().split('T')[0],
+        cost: nextEstimation.summary.totalCost,
+        weight: nextEstimation.summary.totalWeightKg,
+      };
+      setHistory(prev => [newEst, ...prev]);
     } catch (err: any) {
-      triggerToast('Cost estimation failed.');
+      const errorMessage = err?.message || 'Unknown error';
+      triggerToast(errorMessage, 'error', isUploadValidationError(errorMessage) ? 'Upload rejected' : 'Cost estimation failed');
     } finally {
       setIsCalculating(false);
     }
   };
-
   // Toggle visual processes
   const handleProcessToggle = (processName: string) => {
     setParams(prev => {
@@ -1032,6 +1130,7 @@ export default function App() {
     setParams(prev => ({ ...prev, [field]: value }));
   };
 
+  // Handles plate change user action.
   const handlePlateChange = (plateType: 'topPlate' | 'bottomPlate', field: keyof PlateParams, value: string) => {
     setParams(prev => ({
       ...prev,
@@ -1042,6 +1141,7 @@ export default function App() {
     }));
   };
 
+  // Handles export batch master bom user action.
   const handleExportBatchMasterBom = () => {
     const batchFiles = batchUploadFiles;
     const processed = batchFiles
@@ -1054,6 +1154,7 @@ export default function App() {
     }
 
     const numberSafe = excelNumberSafe;
+    // Handles cell.
     const cell = (value: unknown, type: 'String' | 'Number' = 'String', styleId?: string) => {
       const style = styleId ? ` ss:StyleID="${styleId}"` : '';
       if (type === 'Number') {
@@ -1061,8 +1162,10 @@ export default function App() {
       }
       return `<Cell${style}><Data ss:Type="String">${excelXmlEscape(value)}</Data></Cell>`;
     };
+    // Handles row.
     const row = (values: Array<unknown>, numericIndexes: number[] = [], styleId?: string) =>
       `<Row>${values.map((value, index) => cell(value, numericIndexes.includes(index) ? 'Number' : 'String', styleId)).join('')}</Row>`;
+    // Handles header row.
     const headerRow = (values: Array<unknown>) => row(values, [], 'Header');
 
     const summaryRows = processed.map(({ file, result }) => {
@@ -1211,14 +1314,17 @@ export default function App() {
     const structured = estimation.structuredBreakdown || structuredBreakdownCache;
     const currency = structured?.currency || 'INR';
     const generatedAt = new Date().toLocaleString('en-IN');
+    // Handles safe.
     const safe = (value: unknown) => {
       if (value === null || value === undefined || value === '') return '-';
       return String(value);
     };
+    // Handles number safe.
     const numberSafe = (value: unknown) => {
       const numeric = Number(value);
       return Number.isFinite(numeric) ? numeric : 0;
     };
+    // Handles xml escape.
     const xmlEscape = (value: unknown) =>
       safe(value)
         .replace(/&/g, '&amp;')
@@ -1226,6 +1332,7 @@ export default function App() {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&apos;');
+    // Handles cell.
     const cell = (value: unknown, type: 'String' | 'Number' = 'String', styleId?: string, mergeAcross?: number) => {
       const style = styleId ? ` ss:StyleID="${styleId}"` : '';
       const merge = mergeAcross ? ` ss:MergeAcross="${mergeAcross}"` : '';
@@ -1234,12 +1341,18 @@ export default function App() {
       }
       return `<Cell${style}${merge}><Data ss:Type="String">${xmlEscape(value)}</Data></Cell>`;
     };
+    // Handles row.
     const row = (values: Array<unknown>, numericIndexes: number[] = [], styleId?: string) =>
       `<Row>${values.map((value, index) => cell(value, numericIndexes.includes(index) ? 'Number' : 'String', styleId)).join('')}</Row>`;
+    // Handles title row.
     const titleRow = (title: string) => `<Row ss:Height="28">${cell(title, 'String', 'Title', 30)}</Row>`;
+    // Handles section row.
     const sectionRow = (title: string) => `<Row ss:Height="22">${cell(title, 'String', 'Section', 30)}</Row>`;
+    // Handles blank row.
     const blankRow = () => '<Row />';
+    // Handles header row.
     const headerRow = (values: Array<unknown>) => row(values, [], 'Header');
+    // Handles metric row.
     const metricRow = (label: string, value: unknown, unit: string, valueStyle = 'Value') =>
       `<Row>${cell(label, 'String', 'Label')}${cell(value, typeof value === 'number' ? 'Number' : 'String', valueStyle)}${cell(unit, 'String', 'Unit')}</Row>`;
     const totalScrapWeightKg = structured?.per_part_breakdown?.length
@@ -1646,7 +1759,7 @@ export default function App() {
       });
     }
     (estimation.calculationSteps || []).forEach(step => {
-      reportRows.push(row(['Legacy estimate', step.section, step.name, step.formula, step.substitutedValues, step.result]));
+      reportRows.push(row(['Structured estimate', step.section, step.name, step.formula, step.substitutedValues, step.result]));
     });
 
     reportRows.push(blankRow(), sectionRow('Assumptions / Notes'));
@@ -1706,6 +1819,7 @@ export default function App() {
     triggerToast('Excel report downloaded with summary, part-wise cost, dimensions, weights, rates, and formulas.');
   };
 
+  // Handles export formula user action.
   const handleExportFormula = () => {
     if (!estimation) {
       triggerToast('No active calculation to export. Please calculate cost first.');
@@ -1713,10 +1827,12 @@ export default function App() {
     }
 
     const structured = estimation.structuredBreakdown || structuredBreakdownCache;
+    // Handles safe.
     const safe = (value: unknown) => {
       if (value === null || value === undefined || value === '') return '-';
       return String(value);
     };
+    // Handles xml escape.
     const xmlEscape = (value: unknown) =>
       safe(value)
         .replace(/&/g, '&amp;')
@@ -1724,21 +1840,27 @@ export default function App() {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&apos;');
+    // Handles cell.
     const cell = (value: unknown, styleId?: string, mergeAcross?: number) => {
       const style = styleId ? ` ss:StyleID="${styleId}"` : '';
       const merge = mergeAcross ? ` ss:MergeAcross="${mergeAcross}"` : '';
       return `<Cell${style}${merge}><Data ss:Type="String">${xmlEscape(value)}</Data></Cell>`;
     };
+    // Handles row.
     const row = (values: Array<unknown>, styleId?: string) =>
       `<Row>${values.map(value => cell(value, styleId)).join('')}</Row>`;
+    // Handles title row.
     const titleRow = (title: string) => `<Row ss:Height="28">${cell(title, 'Title', 6)}</Row>`;
+    // Handles section row.
     const sectionRow = (title: string) => `<Row ss:Height="22">${cell(title, 'Section', 6)}</Row>`;
+    // Handles header row.
     const headerRow = (values: Array<unknown>) => row(values, 'Header');
+    // Handles blank row.
     const blankRow = () => '<Row />';
     const formulaRows: string[] = [
       titleRow('ikarkhana Formula Export'),
       row(['Generated at', new Date().toLocaleString('en-IN')]),
-      row(['Parent file', estimation.uploadedFile || uploadedImageName || fileName || '-']),
+      row(['Uploaded drawing', estimation.uploadedFile || uploadedImageName || fileName || '-']),
       row(['Part name', structured?.part_name || params.partName || '-']),
       blankRow(),
       sectionRow('Parent And Child Files'),
@@ -1784,9 +1906,9 @@ export default function App() {
 
     (estimation.calculationSteps || []).forEach(step => {
       formulaRows.push(row([
-        estimation.uploadedFile || uploadedImageName || fileName || 'Legacy estimate',
+        estimation.uploadedFile || uploadedImageName || fileName || 'Structured estimate',
         '-',
-        'Legacy estimate',
+        'Structured estimate',
         step.section,
         cleanBreakdownText(step.formula),
         cleanBreakdownText(step.substitutedValues),
@@ -1831,9 +1953,10 @@ export default function App() {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    triggerToast('Formula export downloaded with parent file, child files, part names, and formulas.');
+    triggerToast('Formula export downloaded with uploaded drawing, child files, part names, and formulas.');
   };
 
+  // Opens breakdown in the workspace.
   const openBreakdown = (title: string, steps: Array<CalculationStep | undefined>) => {
     const validSteps = steps.filter(Boolean) as CalculationStep[];
     if (validSteps.length === 0) {
@@ -1843,9 +1966,11 @@ export default function App() {
     setSelectedBreakdown({ title, steps: validSteps });
   };
 
+  // Handles find calculation step.
   const findCalculationStep = (name: string) =>
     estimation?.calculationSteps?.find(step => step.name.toLowerCase() === name.toLowerCase());
 
+  // Handles find process step.
   const findProcessStep = (name: string) => {
     const normalized = name.toLowerCase();
     const aliases: Record<string, string> = {
@@ -1870,6 +1995,7 @@ export default function App() {
       result: String(step.result || ''),
     }));
 
+  // Handles structured steps for.
   const structuredStepsFor = (part: StructuredBreakdown['per_part_breakdown'][number], needles: string[]) => {
     const normalizedNeedles = needles.map(needle => needle.toLowerCase());
     return mapStructuredSteps(part.calculation_steps).filter(step => {
@@ -1878,6 +2004,7 @@ export default function App() {
     });
   };
 
+  // Handles structured step by name.
   const structuredStepByName = (part: StructuredBreakdown['per_part_breakdown'][number], needle: string) => {
     const normalizedNeedle = needle.toLowerCase();
     return mapStructuredSteps(part.calculation_steps).filter(step => step.name.toLowerCase().includes(normalizedNeedle)).slice(0, 1);
@@ -2242,6 +2369,7 @@ export default function App() {
     const valueText = cleanBreakdownText(step.substitutedValues);
     const numberMatches = valueText.match(/[-+]?\d*\.?\d+/g) || [];
     const formulaRows: CalculationStep[] = [];
+    // Handles add.
     const add = (name: string, formula: string, substitutedValues: string, result: string) => {
       formulaRows.push({ section: 'Value Breakdown', name, formula, substitutedValues, result });
     };
@@ -2324,6 +2452,7 @@ export default function App() {
     ];
   };
 
+  // Handles structured dimensions.
   const structuredDimensions = (part: StructuredBreakdown['per_part_breakdown'][number]) => {
     const dims = part.dimensions || {};
     return [
@@ -2334,9 +2463,11 @@ export default function App() {
     ].filter(value => value !== undefined && value !== null && Number(value) > 0).join(' x ') || '-';
   };
 
+  // Handles part dimension badges.
   const partDimensionBadges = (part: StructuredBreakdown['per_part_breakdown'][number]) => {
     const dims = part.dimensions || {};
     const badges: Array<{ label: string; value: string }> = [];
+    // Handles add metric.
     const addMetric = (label: string, value: unknown, unit = 'mm') => {
       const numeric = Number(value);
       if (Number.isFinite(numeric) && numeric > 0) {
@@ -2352,9 +2483,11 @@ export default function App() {
     return badges;
   };
 
+  // Handles part total weight kg.
   const partTotalWeightKg = (part: StructuredBreakdown['per_part_breakdown'][number]) =>
     Number(part.weight_ledger?.unit_net_finished_weight_kg || 0) + Number(part.weight_ledger?.unit_scrap_waste_weight_kg || 0);
 
+  // Renders part image actions UI content.
   const renderPartImageActions = (part: StructuredBreakdown['per_part_breakdown'][number], compact = false) => (
     <div className="absolute inset-x-2 bottom-2 z-10 flex items-end justify-between gap-2 pointer-events-none">
       <div className={`${compact ? 'px-2 py-1' : 'px-3 py-2'} rounded bg-slate-950/82 text-white shadow border border-white/10`}>
@@ -2377,6 +2510,7 @@ export default function App() {
     </div>
   );
 
+  // Parses nesting numbers values.
   const parseNestingNumbers = (item: EstimateLineItem) => {
     const text = item.nestingApproach || '';
     const floorMatches = [...text.matchAll(/floor\(\s*([\d.]+)\s*\/\s*([\d.]+)\s*\)/g)];
@@ -2399,8 +2533,10 @@ export default function App() {
     };
   };
 
+  // Renders nesting visual UI content.
   const renderNestingVisual = (item: EstimateLineItem) => {
     const parsed = parseNestingNumbers(item);
+    // Formats yield percent for display.
     const formatYieldPercent = (value: number) => `${Math.max(Math.min(value, 100), 0).toFixed(1)}%`;
     if (!parsed.canCalculate) {
       return (
@@ -2527,6 +2663,7 @@ export default function App() {
     );
   };
 
+  // Handles has part image region.
   const hasPartImageRegion = (part: StructuredBreakdown['per_part_breakdown'][number]) => {
     const region = part.image_region;
     if (!region) return false;
@@ -2572,6 +2709,7 @@ export default function App() {
     };
   };
 
+  // Handles preview image load user action.
   const handlePreviewImageLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
     const { naturalWidth, naturalHeight } = event.currentTarget;
     if (naturalWidth > 0 && naturalHeight > 0) {
@@ -2579,10 +2717,13 @@ export default function App() {
     }
   };
 
+  // Handles part image region label.
   const partImageRegionLabel = (part: StructuredBreakdown['per_part_breakdown'][number]) =>
     hasPartImageRegion(part) ? (part.image_region?.source || 'Detected part region') : 'Part crop not available';
 
+  // Handles part reference image url.
   const partReferenceImageUrl = (part?: StructuredBreakdown['per_part_breakdown'][number] | null) => {
+    // Handles svg to data uri.
     const svgToDataUri = (svg: string) => `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
     const dims = part?.dimensions || {};
     const length = Number(dims.length_mm || 0);
@@ -2597,6 +2738,7 @@ export default function App() {
       : '';
     const escapedTitle = title.replace(/[<>&"]/g, '');
     const escapedDims = dimensionLine.replace(/[<>&"]/g, '');
+    // Handles frame open.
     const frameOpen = (sectionTitle = escapedTitle) => `<svg width="900" height="620" viewBox="0 0 900 620" fill="none" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <radialGradient id="studio" cx="50%" cy="36%" r="78%"><stop stop-color="#f7f5ee"/><stop offset=".58" stop-color="#b8b3aa"/><stop offset="1" stop-color="#8e887d"/></radialGradient>
@@ -2615,8 +2757,10 @@ export default function App() {
       <text x="790" y="586" fill="#111827" font-family="Arial, sans-serif" font-size="16" font-weight="800">QTY ${qty}</text>
       <ellipse cx="450" cy="512" rx="320" ry="48" fill="#5f584d" opacity=".24" filter="url(#soft)"/>`;
     const frameClose = `</svg>`;
+    // Handles dimension callout.
     const dimensionCallout = (x1: number, y1: number, x2: number, y2: number, label: string) =>
       `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#1f2937" stroke-width="2.4" marker-start="url(#arrow)" marker-end="url(#arrow)"/><rect x="${(x1 + x2) / 2 - 42}" y="${Math.min(y1, y2) - 28}" width="84" height="24" rx="4" fill="#efede6" stroke="#1f2937"/><text x="${(x1 + x2) / 2}" y="${Math.min(y1, y2) - 11}" text-anchor="middle" fill="#111827" font-family="Arial, sans-serif" font-size="14" font-weight="800">${label}</text>`;
+    // Handles hole.
     const hole = (cx: number, cy: number, r = 17) =>
       `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#f7f5ee" stroke="#6a655d" stroke-width="5"/><circle cx="${cx}" cy="${cy}" r="${Math.max(r - 8, 5)}" fill="#c4beb3"/>`;
     const genericShape = `<g filter="url(#shadow)"><polygon points="270,214 560,142 690,224 400,304" fill="url(#steel)" stroke="#716d65" stroke-width="5"/><polygon points="400,304 690,224 690,382 400,468" fill="#969289" stroke="#625f58" stroke-width="5"/><polygon points="270,214 400,304 400,468 270,376" fill="#bbb7ae" stroke="#69655e" stroke-width="5"/></g>`;
@@ -2648,6 +2792,7 @@ export default function App() {
     return svgToDataUri(`${frameOpen()}${genericShape}${frameClose}`);
   };
 
+  // Renders part region annotations UI content.
   const renderPartRegionAnnotations = (compact = false) => {
     const parts = estimation?.structuredBreakdown?.per_part_breakdown || structuredBreakdownCache?.per_part_breakdown || [];
     return parts.filter(hasPartImageRegion).map((part, idx) => {
@@ -2692,6 +2837,7 @@ export default function App() {
   const displayedScrapValue = displayedScrapWeightKg * displayedScrapRate;
 
   const valueButtonClass = "font-mono underline decoration-dotted underline-offset-4 hover:text-[#004ccd] focus:text-[#004ccd] cursor-pointer";
+  // Handles clean breakdown text.
   const cleanBreakdownText = (value: string) =>
     String(value || '-')
       .replace(/\bINR\b/g, 'Rs')
@@ -2700,6 +2846,7 @@ export default function App() {
       .replace(/mm3/g, 'mm cubed')
       .replace(/m2/g, 'm squared');
 
+  // Handles simple breakdown meaning.
   const simpleBreakdownMeaning = (step: CalculationStep) => {
     const text = `${step.section} ${step.name} ${step.formula}`.toLowerCase();
     if (text.includes('scrap') && text.includes('resale')) {
@@ -2742,9 +2889,48 @@ export default function App() {
     <div className="flex flex-col min-h-screen bg-[#f9f9f9] text-[#1a1c1c] font-sans antialiased">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed top-20 right-6 z-[100] flex items-center gap-3 px-5 py-4 bg-slate-900 text-white rounded-lg shadow-xl border border-slate-700 animate-slide-in">
-          <Info className="w-5 h-5 text-sky-400" />
-          <span className="text-sm font-semibold">{toastMessage}</span>
+        <div
+          className={`fixed top-20 right-6 z-[100] w-[min(460px,calc(100vw-32px))] rounded-xl border shadow-2xl animate-slide-in ${
+            toastMessage.kind === 'error'
+              ? 'border-red-200 bg-red-50 text-red-950'
+              : toastMessage.kind === 'warning'
+                ? 'border-amber-200 bg-amber-50 text-amber-950'
+                : toastMessage.kind === 'success'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-950'
+                  : 'border-slate-700 bg-slate-900 text-white'
+          }`}
+        >
+          <div className="flex gap-3 p-4">
+            <div
+              className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                toastMessage.kind === 'error'
+                  ? 'bg-red-100 text-red-700'
+                  : toastMessage.kind === 'warning'
+                    ? 'bg-amber-100 text-amber-700'
+                    : toastMessage.kind === 'success'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-sky-500/15 text-sky-300'
+              }`}
+            >
+              {toastMessage.kind === 'error' ? <AlertTriangle className="h-5 w-5" /> : <Info className="h-5 w-5" />}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-black uppercase tracking-wide">{toastMessage.title}</div>
+              <div className="mt-1 text-sm font-semibold leading-5">{toastMessage.message}</div>
+              {toastMessage.kind === 'error' && (
+                <div className="mt-3 rounded-lg border border-red-200 bg-white/70 px-3 py-2 text-xs font-semibold text-red-900">
+                  Please upload a clear technical drawing with title block, BOM, dimensions, and line work.
+                </div>
+              )}
+            </div>
+            <button
+              className="shrink-0 rounded-md p-1 opacity-70 transition hover:bg-black/5 hover:opacity-100"
+              onClick={() => setToastMessage(null)}
+              aria-label="Close notification"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -2768,7 +2954,7 @@ export default function App() {
             <div className="px-5 py-4 bg-slate-50 border-b border-[#c3c6d8] flex items-center justify-between gap-4">
               <div>
                 <div className="text-[10px] uppercase tracking-widest font-bold text-[#004ccd]">Drawing Dependency Summary</div>
-                <h3 className="text-base font-black text-slate-900">Parent & Child Files</h3>
+                <h3 className="text-base font-black text-slate-900">Drawing & Child Files</h3>
               </div>
               <button
                 type="button"
@@ -2780,7 +2966,7 @@ export default function App() {
             </div>
             <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
               <div className="p-4 border border-blue-100 bg-blue-50/70 rounded-lg">
-                <div className="text-[10px] uppercase font-black tracking-wider text-[#004ccd]">Parent file</div>
+                <div className="text-[10px] uppercase font-black tracking-wider text-[#004ccd]">Uploaded drawing</div>
                 <div className="mt-1 font-mono text-sm font-black text-slate-950">{uploadedImageName || fileName || estimation?.uploadedFile || '-'}</div>
                 <div className="mt-1 text-xs text-slate-600">{estimation?.structuredBreakdown?.part_name || structuredBreakdownCache?.part_name || params.partName || 'Current drawing'}</div>
                 {(filePreview || uploadedImageData) && (
@@ -2793,7 +2979,7 @@ export default function App() {
                     }}
                   >
                     <ZoomIn className="w-3.5 h-3.5" />
-                    View parent image
+                    View drawing image
                   </button>
                 )}
               </div>
@@ -3214,7 +3400,7 @@ export default function App() {
                       <p className="mt-1 text-xs text-cyan-100/70">
                         {isUploadExpanding
                           ? 'Reading ZIP/multiple files and preparing previews for extraction.'
-                          : 'Identifying main drawings and child dependency files before extraction.'}
+                          : 'Identifying uploaded drawings and child dependency files before extraction.'}
                       </p>
                     </div>
                     <div className="font-mono text-xs text-cyan-100/80">{batchUploadFiles.length || uploadPreparingCount} files queued</div>
@@ -3223,9 +3409,9 @@ export default function App() {
                   <div className="relative h-[340px] rounded-xl border border-cyan-300/15 bg-slate-900 overflow-hidden">
                     <div className="absolute inset-0 opacity-25 bg-[linear-gradient(90deg,_rgba(34,211,238,0.12)_1px,_transparent_1px),linear-gradient(0deg,_rgba(34,211,238,0.10)_1px,_transparent_1px)] bg-[size:42px_42px]"></div>
                     <div className="absolute inset-y-8 left-8 w-48 rounded-xl border border-cyan-300/20 bg-slate-950/70 p-4">
-                      <div className="text-[10px] uppercase font-black tracking-widest text-cyan-100/80">Main drawings</div>
+                      <div className="text-[10px] uppercase font-black tracking-widest text-cyan-100/80">Uploaded drawings</div>
                       <div className="mt-4 space-y-2">
-                        {mainBatchFiles().slice(0, 4).map((file, index) => (
+                        {batchFilesForCalculation().slice(0, 4).map((file, index) => (
                           <motion.div
                             key={`main-stack-${file.name}`}
                             className="h-9 rounded border border-emerald-300/40 bg-emerald-400/10 px-3 flex items-center text-[10px] font-mono text-emerald-100 truncate"
@@ -3242,7 +3428,7 @@ export default function App() {
                     <div className="absolute inset-y-8 right-8 w-48 rounded-xl border border-cyan-300/20 bg-slate-950/70 p-4">
                       <div className="text-[10px] uppercase font-black tracking-widest text-cyan-100/80">Dependencies</div>
                       <div className="mt-4 space-y-2">
-                        {batchUploadFiles.filter(file => !mainBatchFiles().some(main => main.name === file.name)).slice(0, 4).map((file, index) => (
+                        {batchUploadFiles.filter(file => expectedChildBaseSetForBatch().has(drawingBase(file.name))).slice(0, 4).map((file, index) => (
                           <motion.div
                             key={`dep-stack-${file.name}`}
                             className="h-9 rounded border border-blue-300/40 bg-blue-400/10 px-3 flex items-center text-[10px] font-mono text-blue-100 truncate"
@@ -3349,7 +3535,7 @@ export default function App() {
                                 ? 'border-red-200 bg-red-50/40'
                                 : 'border-slate-200 bg-slate-50 cursor-wait'
                           }`}
-                          onClick={() => void openMainBatchFile(file)}
+                          onClick={() => void openBatchFile(file)}
                         >
                           <div className="min-w-0">
                             <div className="font-mono text-sm font-black text-slate-950 truncate">{file.name}</div>
@@ -3421,7 +3607,7 @@ export default function App() {
                     <div className="grid grid-cols-[280px_1fr] gap-4 px-1 text-[10px] uppercase font-black text-slate-500">
                       <div>Uploaded file</div>
                       <div className="flex items-center justify-between gap-2">
-                        <span>Child / dependency files for that parent</span>
+                        <span>Child / dependency files used by this drawing</span>
                         <label className="cursor-pointer px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-300 rounded text-[10px] uppercase font-black text-slate-700">
                           Add child files
                           <input
@@ -3441,7 +3627,6 @@ export default function App() {
                     {batchUploadFiles.map((file) => {
                       const expectedChildBases = expectedChildBaseSetForBatch();
                       const isDependencyFile = expectedChildBases.has(drawingBase(file.name));
-                      const isMainFile = !isDependencyFile && mainBatchFiles()[0]?.name === file.name;
                       const referencedByParents = batchUploadFiles.filter(parent => (
                         parent.name !== file.name &&
                         expectedChildFileHints(parent.name).some(hint => fileMatchesHint(file, hint))
@@ -3460,20 +3645,16 @@ export default function App() {
                           className={`grid grid-cols-1 md:grid-cols-[280px_1fr] gap-4 p-3 rounded-lg border transition-colors ${
                             isDependencyFile
                               ? 'bg-emerald-50 border-emerald-300'
-                              : isMainFile
-                                ? 'bg-blue-50/70 border-[#004ccd]'
-                                : 'bg-white border-slate-200'
+                              : 'bg-white border-slate-200'
                           }`}
                         >
                           <div className="flex items-center gap-2">
                             <div className="min-w-0">
-                              <div className={`text-sm font-black truncate ${isDependencyFile ? 'text-emerald-800' : isMainFile ? 'text-[#004ccd]' : 'text-slate-900'}`}>{file.name}</div>
+                              <div className={`text-sm font-black truncate ${isDependencyFile ? 'text-emerald-800' :  'text-slate-900'}`}>{file.name}</div>
                               <div className="text-[10px] font-mono text-slate-500">{file.sizeMb}</div>
+                              <div className="mt-1 text-[9px] uppercase font-black text-[#004ccd]">uploaded drawing</div>
                               {isDependencyFile && (
-                                <div className="mt-1 text-[9px] uppercase font-black text-emerald-700">uploaded dependency file</div>
-                              )}
-                              {isMainFile && (
-                                <div className="mt-1 text-[9px] uppercase font-black text-[#004ccd]">main drawing for calculation</div>
+                                <div className="mt-1 text-[9px] uppercase font-black text-emerald-700">also used as dependency</div>
                               )}
                             </div>
                           </div>
@@ -3485,7 +3666,7 @@ export default function App() {
                                   <div className="text-[9px] uppercase font-black text-emerald-700">Dependency uploaded</div>
                                   <div className="text-base font-black text-slate-900 truncate mt-1">{file.name}</div>
                                   <div className="text-[10px] text-emerald-800 mt-1">
-                                    Used by {referencedByParents.length > 0 ? referencedByParents.map(parent => parent.name).join(', ') : 'a parent drawing'}
+                                    Used by {referencedByParents.length > 0 ? referencedByParents.map(parent => parent.name).join(', ') : 'an uploaded drawing'}
                                   </div>
                                 </div>
                               )}
@@ -3900,7 +4081,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  {false && referencedDrawings.length > 0 && (
+                  {referencedDrawings.length > 0 && (
                     <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg shadow-sm">
                       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                         <div className="flex items-start gap-3">
@@ -3910,7 +4091,7 @@ export default function App() {
                           <div>
                             <h3 className="font-black text-xs uppercase tracking-widest text-amber-900">Referenced child drawings found</h3>
                             <p className="text-xs text-amber-900/75 mt-1">
-                              Parent file: <span className="font-mono font-black">{uploadedImageName || fileName || estimation?.uploadedFile || '-'}</span>. {referencedDrawings.length} child/reference file{referencedDrawings.length > 1 ? 's' : ''} detected.
+                              Uploaded drawing: <span className="font-mono font-black">{uploadedImageName || fileName || estimation?.uploadedFile || '-'}</span>. {referencedDrawings.length} child/reference file{referencedDrawings.length > 1 ? 's' : ''} detected.
                             </p>
                           </div>
                         </div>
@@ -3921,7 +4102,7 @@ export default function App() {
                             onClick={() => setIsDependencySummaryOpen(true)}
                           >
                             <FileText className="w-3.5 h-3.5" />
-                            View parent & child files
+                            View drawing & child files
                           </button>
                           {missingReferencedDrawings.length > 0 && (
                             <button
@@ -5413,3 +5594,6 @@ export default function App() {
     </div>
   );
 }
+
+
+

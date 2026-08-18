@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 const API_BASE = process.env.COST_ESTIMATOR_API_BASE || 'http://127.0.0.1:8010';
 
+// Returns sample extraction data when the local extraction API fallback is used.
 function fallbackData() {
   return {
     partName: 'PILLAR ASSEMBLY',
@@ -39,6 +40,7 @@ function fallbackData() {
   };
 }
 
+// Converts a browser data URL into a File for backend upload.
 function dataUrlToFile(dataUrl: string): File {
   const [header, base64] = dataUrl.split(',');
   const mimeMatch = header.match(/data:(.*?);base64/);
@@ -47,6 +49,7 @@ function dataUrlToFile(dataUrl: string): File {
   return new File([binary], 'uploaded-diagram.png', { type: mimeType });
 }
 
+// Maps backend dimension fields into frontend form fields.
 function mapExtractedDimensions(data: any) {
   const shape = data.main_profile_shape || 'square';
   const isCircular = shape === 'circular';
@@ -94,6 +97,7 @@ function mapExtractedDimensions(data: any) {
   };
 }
 
+// API route that handles POST requests for this endpoint.
 export async function POST(request: Request) {
   try {
     const body = await request.json();

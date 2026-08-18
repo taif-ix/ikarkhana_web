@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 const API_BASE = process.env.COST_ESTIMATOR_API_BASE || 'http://127.0.0.1:8010';
 
+// API route that handles GET requests for this endpoint.
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);

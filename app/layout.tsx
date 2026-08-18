@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   description: 'Engineering diagram cost estimation frontend',
 };
 
+// Sets the shared Next.js page layout and metadata.
 export default function RootLayout({
   children,
 }: Readonly<{ 

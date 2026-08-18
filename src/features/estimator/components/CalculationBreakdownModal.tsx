@@ -15,6 +15,7 @@ type CalculationBreakdownModalProps = {
   onOpenStepSource: (title: string, step: CalculationStep) => void;
 };
 
+// Renders the calculation breakdown modal UI section.
 export function CalculationBreakdownModal({
   selectedBreakdown,
   onClose,

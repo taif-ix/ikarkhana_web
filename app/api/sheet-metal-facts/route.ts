@@ -13,10 +13,12 @@ const LOCAL_FACTS = [
   'Welding cost often depends on weld length, joint type, accessibility, and required finish quality.',
 ];
 
+// Selects sheet-metal facts for the facts API route.
 function pickFacts(count = 5) {
   return [...LOCAL_FACTS].sort(() => Math.random() - 0.5).slice(0, count);
 }
 
+// API route that handles GET requests for this endpoint.
 export async function GET() {
   try {
     const response = await fetch('https://uselessfacts.jsph.pl/api/v2/facts/random?language=en', {

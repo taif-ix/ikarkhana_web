@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
 <img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
 </div>
 
@@ -46,4 +46,5 @@ The backend should be running separately at:
 http://127.0.0.1:8010
 ```
 
-The Next.js app exposes `/api/extract` and `/api/estimate` as thin adapters to the FastAPI backend, so the browser stays on the frontend origin while costing and extraction remain in the backend repo.
+The Next.js app exposes `/api/extract`, `/api/structured-estimate`, and batch proxy routes as thin adapters to the FastAPI backend, so the browser stays on the frontend origin while costing and extraction remain in the backend repo.
+
