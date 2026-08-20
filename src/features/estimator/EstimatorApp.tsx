@@ -896,8 +896,12 @@ export default function App() {
   // Trigger costing calculations
   const calculateCost = async () => {
     if (hasBlockingMissingChildDrawings) {
-      triggerToast('Upload missing child drawings or choose calculate without missing files.');
-      return;
+      setAllowMissingChildDrawings(true);
+      triggerToast(
+        `Incomplete drawing set: calculating with available drawings. Missing: ${missingReferencedDrawings
+          .map((drawing) => drawing.file_name_hint || `${drawing.drawing_number}.tif`)
+          .join(', ')}.`
+      );
     }
 
     setIsCalculating(true);
@@ -3516,7 +3520,7 @@ export default function App() {
                         : 'px-6 py-3 bg-[#0f62fe] hover:bg-blue-700 text-white text-sm min-w-[220px]'
                     }`}
                     onClick={isExtractionComplete ? calculateCost : handleManualExtract}
-                    disabled={isAnalyzing || isCalculating || (isExtractionComplete && hasBlockingMissingChildDrawings)}
+                    disabled={isAnalyzing || isCalculating}
                   >
                     {isAnalyzing || isCalculating ? (
                       <RefreshCw className={`${isExtractionComplete ? 'w-5 h-5' : 'w-3.5 h-3.5'} animate-spin`} />
@@ -4348,7 +4352,7 @@ export default function App() {
                           type="button"
                           className="px-3 py-1.5 bg-white hover:bg-[#004ccd] border border-[#004ccd]/30 hover:border-[#004ccd] text-[#004ccd] hover:text-white rounded text-[10px] font-black uppercase tracking-wider transition-colors flex items-center gap-1.5 disabled:opacity-60"
                           onClick={calculateCost}
-                          disabled={isCalculating || hasBlockingMissingChildDrawings}
+                          disabled={isCalculating}
                         >
                           {isCalculating ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Calculator className="w-3.5 h-3.5" />}
                           {estimation ? 'Recalculate' : 'Calculate'}
@@ -5050,7 +5054,7 @@ export default function App() {
                             type="button"
                             className="mt-2 px-6 py-3 bg-[#004ccd] hover:bg-[#0f62fe] disabled:bg-slate-300 disabled:text-slate-500 text-white rounded font-black uppercase tracking-wider text-xs shadow-sm transition-colors flex items-center gap-2"
                             onClick={calculateCost}
-                            disabled={isCalculating || hasBlockingMissingChildDrawings}
+                            disabled={isCalculating}
                           >
                             {isCalculating ? (
                               <RefreshCw className="w-4 h-4 animate-spin" />
