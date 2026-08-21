@@ -1851,6 +1851,14 @@ export default function App() {
     });
   };
 
+  const structuredNamedStepsFor = (part: StructuredBreakdown['per_part_breakdown'][number], names: string[]) => {
+    const normalizedNames = names.map(name => name.toLowerCase());
+    return mapStructuredSteps(part.calculation_steps).filter(step => {
+      const stepName = step.name.toLowerCase();
+      return normalizedNames.some(name => stepName.includes(name));
+    });
+  };
+
   const allocatedScrapBreakdownSteps = (): CalculationStep[] => {
     const structured = estimation?.structuredBreakdown || structuredBreakdownCache;
     if (structured?.per_part_breakdown?.length) {
@@ -4603,7 +4611,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Bending`, structuredStepsFor(part, ['bending']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Bend Count`, structuredNamedStepsFor(part, ['bend count']))}
                                             >
                                               {part.bends_per_part}
                                             </button>
@@ -4616,7 +4624,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-emerald-900`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Weight`, mapStructuredSteps(part.calculation_steps))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Net Finished Weight`, structuredNamedStepsFor(part, ['net weight']))}
                                             >
                                               {part.weight_ledger.unit_net_finished_weight_kg.toFixed(3)} kg
                                             </button>
@@ -4626,7 +4634,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-amber-900`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Scrap`, mapStructuredSteps(part.calculation_steps))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Scrap / Waste Weight`, structuredNamedStepsFor(part, ['scrap waste weight']))}
                                             >
                                               {part.weight_ledger.unit_scrap_waste_weight_kg.toFixed(3)} kg
                                             </button>
@@ -4636,7 +4644,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Gross RM Weight`, structuredStepsFor(part, ['gross rm weight']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Gross RM Weight`, structuredNamedStepsFor(part, ['gross rm weight']))}
                                             >
                                               {part.weight_ledger.unit_gross_rm_weight_kg.toFixed(3)} kg
                                             </button>
@@ -4646,7 +4654,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Set Gross Weight`, structuredStepsFor(part, ['gross rm weight']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Set Gross Weight`, structuredNamedStepsFor(part, ['total set gross weight']))}
                                             >
                                               {part.weight_ledger.total_set_gross_weight_kg.toFixed(3)} kg
                                             </button>
@@ -4659,7 +4667,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Laser Cutting`, structuredStepsFor(part, ['laser cutting']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Laser Cutting Length`, structuredNamedStepsFor(part, ['laser cutting length']))}
                                             >
                                               {part.cutting_metrics.laser_cutting_length_mm} mm
                                             </button>
@@ -4669,7 +4677,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Press Cutting`, structuredStepsFor(part, ['press cutting', 'press / punching']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Press Machine Hits`, structuredNamedStepsFor(part, ['press machine hits']))}
                                             >
                                               {part.cutting_metrics.press_machine_hits_count}
                                             </button>
@@ -4682,7 +4690,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-[#004ccd]`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Material Cost`, mapStructuredSteps(part.calculation_steps))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Material Cost`, structuredNamedStepsFor(part, ['material cost']))}
                                             >
                                               {formatInr(part.calculated_costs.material_cost)}
                                             </button>
@@ -4692,7 +4700,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-[#004ccd]`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Laser Cost`, structuredStepsFor(part, ['laser cutting cost']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Laser Cost`, structuredNamedStepsFor(part, ['laser cutting cost']))}
                                             >
                                               {formatInr(part.calculated_costs.laser_cutting_cost_estimate)}
                                             </button>
@@ -4702,7 +4710,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Press Cost`, structuredStepsFor(part, ['press cutting cost']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Press Cost`, structuredNamedStepsFor(part, ['press cutting cost']))}
                                             >
                                               {formatInr(part.calculated_costs.machine_punching_cost_estimate)}
                                             </button>
@@ -4712,7 +4720,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Bending + Painting`, structuredStepsFor(part, ['bending cost', 'painting cost']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Bending + Painting`, structuredNamedStepsFor(part, ['bending cost', 'painting cost']))}
                                             >
                                               {formatInr(part.calculated_costs.bending_cost)} + {formatInr(part.calculated_costs.painting_cost)}
                                             </button>
@@ -4722,7 +4730,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Single via Laser`, structuredStepsFor(part, ['total via laser']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Single via Laser`, structuredNamedStepsFor(part, ['total via laser']))}
                                             >
                                               {formatInr(part.calculated_costs.total_single_part_cost_via_laser)}
                                             </button>
@@ -4732,7 +4740,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               className={`${valueButtonClass} font-mono text-xs text-slate-800`}
-                                              onClick={() => openBreakdown(`Part ${part.part_number} Single via Machine`, structuredStepsFor(part, ['total via machine']))}
+                                              onClick={() => openBreakdown(`Part ${part.part_number} Single via Machine`, structuredNamedStepsFor(part, ['total via machine']))}
                                             >
                                               {formatInr(part.calculated_costs.total_single_part_cost_via_machine)}
                                             </button>

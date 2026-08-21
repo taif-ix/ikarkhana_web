@@ -19,10 +19,14 @@ export function CalculationBreakdownModal({
   selectedBreakdown,
   onClose,
   cleanBreakdownText,
-  simpleBreakdownMeaning,
-  onOpenStepSource,
 }: CalculationBreakdownModalProps) {
   if (!selectedBreakdown) return null;
+
+  const lines = (value: string) =>
+    cleanBreakdownText(value)
+      .split(/\r?\n+|\s*;\s*/)
+      .map((line) => line.trim())
+      .filter(Boolean);
 
   return (
     <div className="fixed inset-0 z-[120] bg-slate-950/45 flex items-center justify-center p-4" onClick={onClose}>
@@ -51,29 +55,23 @@ export function CalculationBreakdownModal({
                   {cleanBreakdownText(step.result)}
                 </div>
               </div>
-              <div className="p-3 bg-blue-50/60 border border-blue-100 rounded-md">
-                <div className="text-[10px] uppercase font-black text-[#004ccd] mb-1">Simple meaning</div>
-                <div className="text-xs text-slate-700 leading-relaxed">{simpleBreakdownMeaning(step)}</div>
-              </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  className="p-3 bg-slate-50 rounded border border-slate-100 text-left hover:border-[#004ccd] hover:bg-blue-50/50 transition-colors"
-                  onClick={() => onOpenStepSource(`Formula Source: ${step.name}`, step)}
-                >
-                  <div className="text-[10px] uppercase font-black text-slate-500 mb-1">Formula</div>
-                  <div className="font-mono text-xs text-slate-800 leading-relaxed">{cleanBreakdownText(step.formula)}</div>
-                  <div className="text-[9px] uppercase font-bold text-[#004ccd] mt-2">Click for source</div>
-                </button>
-                <button
-                  type="button"
-                  className="p-3 bg-slate-50 rounded border border-slate-100 text-left hover:border-[#004ccd] hover:bg-blue-50/50 transition-colors"
-                  onClick={() => onOpenStepSource(`Values Used: ${step.name}`, step)}
-                >
-                  <div className="text-[10px] uppercase font-black text-slate-500 mb-1">Values used</div>
-                  <div className="font-mono text-xs text-slate-800 leading-relaxed">{cleanBreakdownText(step.substitutedValues)}</div>
-                  <div className="text-[9px] uppercase font-bold text-[#004ccd] mt-2">Click for source</div>
-                </button>
+                <div className="p-3 bg-slate-50 rounded border border-slate-200">
+                  <div className="text-[10px] uppercase font-black text-[#004ccd] mb-2">Formula</div>
+                  <div className="space-y-1.5 font-mono text-xs text-slate-800 leading-relaxed">
+                    {lines(step.formula).map((line, lineIndex) => (
+                      <div key={lineIndex} className="break-words">{line}</div>
+                    ))}
+                  </div>
+                </div>
+                <div className="p-3 bg-blue-50/50 rounded border border-blue-100">
+                  <div className="text-[10px] uppercase font-black text-[#004ccd] mb-2">Values used</div>
+                  <div className="divide-y divide-blue-100 font-mono text-xs text-slate-800 leading-relaxed">
+                    {lines(step.substitutedValues).map((line, lineIndex) => (
+                      <div key={lineIndex} className="py-1.5 first:pt-0 last:pb-0 break-words">{line}</div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           ))}
