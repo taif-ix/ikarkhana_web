@@ -25,5 +25,6 @@ export interface BackendBatchFileResult {
   child_files?: Array<{ file_name: string; size_mb: string; preview_image: string }>;
   child_hints?: string[];
   missing_child_hints?: string[];
+  structured_extraction?: unknown;
   structured_breakdown?: StructuredBreakdown;
 }

@@ -80,6 +80,7 @@ export interface ReferencedDrawing {
 export interface StructuredBreakdown {
   currency: string;
   part_name?: string | null;
+  raw_material_type?: string | null;
   raw_material_code?: string | null;
   referenced_drawings?: ReferencedDrawing[];
   per_part_breakdown: Array<{
@@ -92,10 +93,32 @@ export interface StructuredBreakdown {
     per_set_qty: number;
     dimensions?: {
       length_mm?: number | null;
-      width_or_outer_dia_mm?: number | null;
-      secondary_width_mm?: number | null;
-      thickness_or_wall_thickness_mm?: number | null;
+      width_mm?: number | null;
+      height_mm?: number | null;
+      outer_diameter_mm?: number | null;
+      thickness_mm?: number | null;
     };
+    holes?: Array<{
+      hole_type: string;
+      diameter_mm?: number | null;
+      quantity_per_part?: number | null;
+      through?: boolean | null;
+    }>;
+    slots?: Array<{
+      slot_type: string;
+      length_mm?: number | null;
+      width_mm?: number | null;
+      quantity_per_part?: number | null;
+      through?: boolean | null;
+    }>;
+    threads?: Array<{ thread_size?: string | null; nominal_diameter_mm?: number | null; quantity_per_part?: number | null }>;
+    notches?: Array<{ length_mm?: number | null; width_mm?: number | null; quantity_per_part?: number | null }>;
+    cutouts?: Array<{ length_mm?: number | null; width_mm?: number | null; quantity_per_part?: number | null }>;
+    chamfers?: Array<{ size_mm?: number | null; angle_deg?: number | null; quantity_per_part?: number | null }>;
+    flat_pattern?: {
+      holes?: Array<{ hole_type: string; diameter_mm?: number | null; quantity_per_part?: number | null; through?: boolean | null }>;
+      slots?: Array<{ slot_type: string; length_mm?: number | null; width_mm?: number | null; quantity_per_part?: number | null; through?: boolean | null }>;
+    } | null;
     image_region?: {
       x_min?: number | null;
       y_min?: number | null;
@@ -108,6 +131,9 @@ export interface StructuredBreakdown {
     cutting_metrics: {
       laser_cutting_length_mm: number;
       press_machine_hits_count: number;
+      outer_profile_cut_length_mm?: number;
+      internal_feature_cut_length_mm?: number;
+      internal_feature_count?: number;
     };
     weight_ledger: {
       unit_gross_rm_weight_kg: number;

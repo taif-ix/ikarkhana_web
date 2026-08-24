@@ -46,4 +46,4 @@ The backend should be running separately at:
 http://127.0.0.1:8010
 ```
 
-The Next.js app exposes `/api/extract` and `/api/estimate` as thin adapters to the FastAPI backend, so the browser stays on the frontend origin while costing and extraction remain in the backend repo.
+The Next.js app exposes `/api/structured-estimate` as the adapter for structured extraction and deterministic costing, so the browser stays on the frontend origin while extraction and calculation remain in the backend repo.

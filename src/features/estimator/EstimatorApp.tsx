@@ -38,10 +38,12 @@ import {
 import { DEFAULT_AVATAR_URL, DEFAULT_IMAGE_URL } from '../../constants/assets';
 import { formatInr } from '../../lib/formatters';
 import {
+  AiJsonViewer,
   CalculationBreakdownModal,
   ExportActions,
   NestingVisualModal,
 } from './components';
+import type { AiJsonEntry } from './components';
 import { useBatchProcessing } from './hooks/useBatchProcessing';
 import { downloadTextFile, numberSafe as excelNumberSafe, safe as excelSafe, xmlEscape as excelXmlEscape } from './lib/excelXml';
 import type { BackendBatchFileResult, BatchProcessingResult, BatchUploadFile } from '../../types/batch';
@@ -84,6 +86,8 @@ export default function App() {
   const [isExtractionComplete, setIsExtractionComplete] = useState(false);
   const [scanPreviewPhase, setScanPreviewPhase] = useState<'scan' | 'reference'>('scan');
   const [apiSource, setApiSource] = useState<'simulation_fallback' | 'gemini_api' | null>(null);
+  const [aiJsonEntries, setAiJsonEntries] = useState<AiJsonEntry[]>([]);
+  const [isAiJsonViewerOpen, setIsAiJsonViewerOpen] = useState(false);
 
   // zoom preview
   const [zoomLevel, setZoomLevel] = useState<number>(100);
@@ -210,6 +214,9 @@ export default function App() {
         signal: controller.signal,
       });
       const result = await response.json();
+      if (result?.success && result?.data) {
+        captureAiJson('Reference extraction', result.data, undefined, 'batch-reference-extraction');
+      }
       const scannedFiles = Array.isArray(result?.data?.files) ? result.data.files : [];
       scannedFiles.forEach((fileResult: any) => {
         const fileName = String(fileResult.file_name || fileResult.fileName || '').trim();
@@ -392,24 +399,24 @@ export default function App() {
       shape: firstTube?.tube_type || firstTube?.component_type || '',
       isHollow: firstTube?.component_type?.toLowerCase() === 'tube',
       length: dims.length_mm ? String(dims.length_mm) : '',
-      diameter: dims.width_or_outer_dia_mm ? String(dims.width_or_outer_dia_mm) : '',
-      thickness: dims.thickness_or_wall_thickness_mm ? String(dims.thickness_or_wall_thickness_mm) : '',
+      diameter: dims.outer_diameter_mm ? String(dims.outer_diameter_mm) : dims.width_mm ? String(dims.width_mm) : '',
+      thickness: dims.thickness_mm ? String(dims.thickness_mm) : '',
       qty: firstTube?.per_set_qty ? String(firstTube.per_set_qty) : '1',
       topPlate: {
         length: topPlate?.dimensions?.length_mm ? String(topPlate.dimensions.length_mm) : '',
-        width: topPlate?.dimensions?.width_or_outer_dia_mm ? String(topPlate.dimensions.width_or_outer_dia_mm) : '',
-        thickness: topPlate?.dimensions?.thickness_or_wall_thickness_mm ? String(topPlate.dimensions.thickness_or_wall_thickness_mm) : '',
+        width: topPlate?.dimensions?.width_mm ? String(topPlate.dimensions.width_mm) : '',
+        thickness: topPlate?.dimensions?.thickness_mm ? String(topPlate.dimensions.thickness_mm) : '',
       },
       bottomPlate: {
         length: bottomPlate?.dimensions?.length_mm ? String(bottomPlate.dimensions.length_mm) : '',
-        width: bottomPlate?.dimensions?.width_or_outer_dia_mm ? String(bottomPlate.dimensions.width_or_outer_dia_mm) : '',
-        thickness: bottomPlate?.dimensions?.thickness_or_wall_thickness_mm ? String(bottomPlate.dimensions.thickness_or_wall_thickness_mm) : '',
+        width: bottomPlate?.dimensions?.width_mm ? String(bottomPlate.dimensions.width_mm) : '',
+        thickness: bottomPlate?.dimensions?.thickness_mm ? String(bottomPlate.dimensions.thickness_mm) : '',
       },
-      handleOd: handle?.dimensions?.width_or_outer_dia_mm ? String(handle.dimensions.width_or_outer_dia_mm) : '',
-      handleThickness: handle?.dimensions?.thickness_or_wall_thickness_mm ? String(handle.dimensions.thickness_or_wall_thickness_mm) : '',
+      handleOd: handle?.dimensions?.outer_diameter_mm ? String(handle.dimensions.outer_diameter_mm) : '',
+      handleThickness: handle?.dimensions?.thickness_mm ? String(handle.dimensions.thickness_mm) : '',
       handleLength: handle?.dimensions?.length_mm ? String(handle.dimensions.length_mm) : '',
       angleLength: angle?.dimensions?.length_mm ? String(angle.dimensions.length_mm) : '',
-      screwDia: screw?.dimensions?.width_or_outer_dia_mm ? String(screw.dimensions.width_or_outer_dia_mm) : '',
+      screwDia: screw?.dimensions?.outer_diameter_mm ? String(screw.dimensions.outer_diameter_mm) : '',
       screwLength: screw?.dimensions?.length_mm ? String(screw.dimensions.length_mm) : '',
       screwQty: screw?.per_set_qty ? String(screw.per_set_qty) : '',
       cuttingLength: String(Math.round(totalLaserLength)),
@@ -417,7 +424,7 @@ export default function App() {
       weldLength: String(structured.assembly_level_fabrication?.total_assembly_welding_length_mm || ''),
       bendCount: String(totalBends),
       pressHits: String(totalPressHits),
-      processes: ['Cutting', 'Welding', 'Surface', 'Bending', 'Pressing'],
+      processes: [params.processes.includes('Press') ? 'Press' : 'Cutting', 'Welding', 'Surface', 'Bending'],
     };
   };
 
@@ -427,6 +434,7 @@ export default function App() {
     childFiles: BatchUploadFile[],
   ): EstimationResult => {
     const parts = structured.per_part_breakdown || [];
+    const usePress = params.processes.includes('Press');
     const totalGrossWeight = parts.reduce((total, part) => (
       total + Number(part.weight_ledger?.total_set_gross_weight_kg || 0)
     ), 0);
@@ -435,12 +443,16 @@ export default function App() {
     ), 0);
     const materialCost = parts.reduce((total, part) => total + Number(part.calculated_costs?.material_cost || 0) * Number(part.per_set_qty || 1), 0);
     const partProcessCost = parts.reduce((total, part) => total
-      + Number(part.calculated_costs?.laser_cutting_cost_estimate || 0) * Number(part.per_set_qty || 1)
+      + Number(usePress
+        ? part.calculated_costs?.machine_punching_cost_estimate
+        : part.calculated_costs?.laser_cutting_cost_estimate || 0) * Number(part.per_set_qty || 1)
       + Number(part.calculated_costs?.bending_cost || 0) * Number(part.per_set_qty || 1)
       + Number(part.calculated_costs?.painting_cost || 0) * Number(part.per_set_qty || 1), 0);
     const assemblyProcessCost = Number(structured.assembly_level_fabrication?.welding_labor_cost || 0)
       + Number(structured.assembly_level_fabrication?.tacking_fixed_setup_cost || 0);
-    const totalCost = Number(structured.assembly_level_fabrication?.grand_total_assembly_cost_via_laser || materialCost + partProcessCost + assemblyProcessCost);
+    const totalCost = Number((usePress
+      ? structured.assembly_level_fabrication?.grand_total_assembly_cost_via_machine
+      : structured.assembly_level_fabrication?.grand_total_assembly_cost_via_laser) || materialCost + partProcessCost + assemblyProcessCost);
 
     return {
       summary: {
@@ -455,7 +467,7 @@ export default function App() {
         qty: 1,
       },
       processDetails: [
-        { name: 'Laser Cutting', unitCost: 0, cost: parts.reduce((total, part) => total + Number(part.calculated_costs?.laser_cutting_cost_estimate || 0) * Number(part.per_set_qty || 1), 0) },
+        { name: usePress ? 'Press / Punching' : 'Laser Cutting', unitCost: 0, cost: parts.reduce((total, part) => total + Number(usePress ? part.calculated_costs?.machine_punching_cost_estimate : part.calculated_costs?.laser_cutting_cost_estimate || 0) * Number(part.per_set_qty || 1), 0) },
         { name: 'Bending', unitCost: 0, cost: parts.reduce((total, part) => total + Number(part.calculated_costs?.bending_cost || 0) * Number(part.per_set_qty || 1), 0) },
         { name: 'Welding', unitCost: 0, cost: Number(structured.assembly_level_fabrication?.welding_labor_cost || 0) },
         { name: 'Painting', unitCost: 0, cost: parts.reduce((total, part) => total + Number(part.calculated_costs?.painting_cost || 0) * Number(part.per_set_qty || 1), 0) },
@@ -504,6 +516,16 @@ export default function App() {
     const nextResults: Record<string, BatchProcessingResult> = {};
 
     files.forEach(fileResult => {
+      if (fileResult.structured_extraction) {
+        captureAiJson(
+          'Structured extraction',
+          fileResult.structured_extraction,
+          fileResult.file_name,
+          `batch-structured-${fileResult.file_name}`,
+          '/batch-process/start → /batch-process/{job_id}',
+          'Structured part-by-part AI extraction produced by the asynchronous batch worker for this drawing.',
+        );
+      }
       const uploadFile = uploadByName.get(fileResult.file_name) || {
         name: fileResult.file_name,
         sizeMb: fileResult.size_mb,
@@ -537,57 +559,35 @@ export default function App() {
       }));
 
       try {
-        const extractResponse = await fetch('/api/extract', {
+        const structuredResponse = await fetch('/api/structured-estimate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: parent.image, useDefault: false }),
+          body: JSON.stringify({
+            image: parent.image,
+            filename: parent.name,
+            childDrawings: childFiles.map(file => ({
+              drawingNumber: file.name.replace(/\.[^.]+$/, ''),
+              filename: file.name,
+              image: file.image,
+            })),
+            params,
+          }),
         });
-        const extractResult = await extractResponse.json();
-        if (!extractResult.success) {
-          throw new Error(extractResult.error || 'Extraction failed');
+        const structuredResult = await structuredResponse.json();
+        if (!structuredResult.success) {
+          throw new Error(structuredResult.error || 'Structured extraction failed');
         }
-
-        const extractedParams = extractResult.data as TechnicalParams;
-        let structuredBreakdown: StructuredBreakdown | undefined;
-        try {
-          const structuredResponse = await fetch('/api/structured-estimate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              image: parent.image,
-              filename: parent.name,
-              childDrawings: childFiles.map(file => ({
-                drawingNumber: file.name.replace(/\.[^.]+$/, ''),
-                filename: file.name,
-                image: file.image,
-              })),
-              params: extractedParams,
-            }),
-          });
-          const structuredResult = await structuredResponse.json();
-          if (structuredResult.success) {
-            structuredBreakdown = structuredResult.data;
-          }
-        } catch {
-          structuredBreakdown = undefined;
-        }
-
-        const estimateResponse = await fetch('/api/estimate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(extractedParams),
-        });
-        const estimateResult = await estimateResponse.json();
-        if (!estimateResult.success) {
-          throw new Error(estimateResult.error || 'Cost calculation failed');
-        }
+        captureAiJson('Structured extraction', structuredResult.aiResponse, parent.name);
+        const structuredBreakdown = structuredResult.data as StructuredBreakdown;
+        const extractedParams = paramsFromStructuredBreakdown(structuredBreakdown, parent.name);
+        const structuredEstimation = estimationFromStructuredBreakdown(structuredBreakdown, parent, childFiles);
 
         setBatchProcessingResults(prev => ({
           ...prev,
           [parent.name]: {
             status: 'processed',
             params: extractedParams,
-            estimation: { ...estimateResult, structuredBreakdown },
+            estimation: structuredEstimation,
             structuredBreakdown,
             childFiles,
           },
@@ -782,43 +782,37 @@ export default function App() {
     });
 
     try {
-      const response = await fetch('/api/extract', {
+      if (!imgData || imgData.startsWith('http')) {
+        throw new Error('Upload a real drawing before requesting structured extraction.');
+      }
+      const response = await fetch('/api/structured-estimate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          image: imgData.startsWith('http') ? '' : imgData, 
-          useDefault: imgData.startsWith('http') 
+        body: JSON.stringify({
+          image: imgData,
+          filename: name || uploadedImageName || fileName || 'uploaded-diagram',
+          childDrawings: batchChildFiles.map(file => ({
+            drawingNumber: file.name.replace(/\.[^.]+$/, ''),
+            filename: file.name,
+            image: file.image,
+          })),
+          params,
         })
       });
       const result = await response.json();
       
       if (result.success) {
-        setParams(result.data);
-        setApiSource(result.source);
-        if (imgData && !imgData.startsWith('http')) {
-          try {
-            const structuredResponse = await fetch('/api/structured-estimate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                image: imgData,
-                filename: name || uploadedImageName || fileName || 'uploaded-diagram',
-                childDrawings: batchChildFiles.map(file => ({
-                  drawingNumber: file.name.replace(/\.[^.]+$/, ''),
-                  filename: file.name,
-                  image: file.image,
-                })),
-                params: result.data,
-              }),
-            });
-            const structuredResult = await structuredResponse.json();
-            if (structuredResult.success) {
-              setStructuredBreakdownCache(structuredResult.data);
-            }
-          } catch {
-            setStructuredBreakdownCache(null);
-          }
-        }
+        const structured = result.data as StructuredBreakdown;
+        const extractedParams = paramsFromStructuredBreakdown(structured, name);
+        captureAiJson('Structured extraction', result.aiResponse, name);
+        setParams(extractedParams);
+        setStructuredBreakdownCache(structured);
+        setEstimation(estimationFromStructuredBreakdown(
+          structured,
+          { name, sizeMb: fileSize || '0', image: imgData, isChild: false },
+          batchChildFiles,
+        ));
+        setApiSource('gemini_api');
       } else {
         throw new Error(result.error);
       }
@@ -906,68 +900,48 @@ export default function App() {
 
     setIsCalculating(true);
     try {
-      const response = await fetch('/api/estimate', {
+      const cachedStructured = structuredBreakdownCache || estimation?.structuredBreakdown;
+      const attachedChildDrawings = Object.entries(childDrawingImages).map(([drawingNumber, image]) => ({
+        drawingNumber,
+        filename: childDrawingUploads[drawingNumber] || `${drawingNumber}.tif`,
+        image,
+      }));
+      const requestBody = cachedStructured && attachedChildDrawings.length === 0
+        ? { extraction: cachedStructured, params }
+        : {
+            image: uploadedImageData,
+            filename: uploadedImageName || fileName || 'uploaded-diagram',
+            childDrawings: attachedChildDrawings,
+            params,
+          };
+      const response = await fetch('/api/structured-estimate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params)
+        body: JSON.stringify(requestBody),
       });
       const result = await response.json();
       if (result.success) {
-        let structuredBreakdown: StructuredBreakdown | undefined;
-        let structuredError: string | undefined;
-
-        const cachedStructured = structuredBreakdownCache || estimation?.structuredBreakdown;
-        const attachedChildDrawings = Object.entries(childDrawingImages).map(([drawingNumber, image]) => ({
-          drawingNumber,
-          filename: childDrawingUploads[drawingNumber] || `${drawingNumber}.tif`,
-          image,
-        }));
-
-        if (cachedStructured && attachedChildDrawings.length === 0) {
-          try {
-            const structuredResponse = await fetch('/api/structured-estimate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                extraction: cachedStructured,
-                params,
-              }),
-            });
-            const structuredResult = await structuredResponse.json();
-            if (structuredResult.success) {
-              structuredBreakdown = structuredResult.data;
-              setStructuredBreakdownCache(structuredResult.data);
-            } else {
-              structuredError = structuredResult.error || 'Structured JSON breakdown failed.';
-            }
-          } catch (error: any) {
-            structuredError = error.message || 'Structured JSON breakdown failed.';
-          }
-        } else if (uploadedImageData) {
-          try {
-            const structuredResponse = await fetch('/api/structured-estimate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                image: uploadedImageData,
-                filename: uploadedImageName || fileName || 'uploaded-diagram',
-                childDrawings: attachedChildDrawings,
-                params,
-              }),
-            });
-            const structuredResult = await structuredResponse.json();
-            if (structuredResult.success) {
-              structuredBreakdown = structuredResult.data;
-              setStructuredBreakdownCache(structuredResult.data);
-            } else {
-              structuredError = structuredResult.error || 'Structured JSON breakdown failed.';
-            }
-          } catch (error: any) {
-            structuredError = error.message || 'Structured JSON breakdown failed.';
-          }
+        const structuredBreakdown = result.data as StructuredBreakdown;
+        if (result.aiResponse) {
+          captureAiJson('Structured extraction', result.aiResponse, uploadedImageName || fileName || 'uploaded-diagram');
         }
-
-        setEstimation({ ...result, structuredBreakdown, structuredError });
+        setStructuredBreakdownCache(structuredBreakdown);
+        const calculatedEstimation = estimationFromStructuredBreakdown(
+          structuredBreakdown,
+          {
+            name: uploadedImageName || fileName || 'uploaded-diagram',
+            sizeMb: fileSize || '0',
+            image: uploadedImageData || filePreview,
+            isChild: false,
+          },
+          attachedChildDrawings.map(drawing => ({
+            name: drawing.filename,
+            sizeMb: '0',
+            image: drawing.image,
+            isChild: true,
+          })),
+        );
+        setEstimation(calculatedEstimation);
         triggerToast('Cost estimate successfully calculated!');
         
         // Add to history
@@ -975,8 +949,8 @@ export default function App() {
           id: 'EST-' + Math.floor(1000 + Math.random() * 9000),
           partName: params.partName || 'Unnamed Part',
           date: new Date().toISOString().split('T')[0],
-          cost: result.summary.totalCost,
-          weight: result.summary.totalWeightKg
+          cost: calculatedEstimation.summary.totalCost,
+          weight: calculatedEstimation.summary.totalWeightKg
         };
         setHistory(prev => [newEst, ...prev]);
       } else {
@@ -992,6 +966,13 @@ export default function App() {
   // Toggle visual processes
   const handleProcessToggle = (processName: string) => {
     setParams(prev => {
+      if (processName === 'Cutting' || processName === 'Press') {
+        const otherMethod = processName === 'Cutting' ? 'Press' : 'Cutting';
+        return {
+          ...prev,
+          processes: [...prev.processes.filter(process => process !== otherMethod && process !== processName), processName],
+        };
+      }
       const active = prev.processes.includes(processName);
       const newProcesses = active 
         ? prev.processes.filter(p => p !== processName)
@@ -1074,8 +1055,8 @@ export default function App() {
             String(part.component_type || '-').toUpperCase(),
             qty,
             part.dimensions?.length_mm,
-            part.dimensions?.width_or_outer_dia_mm,
-            part.dimensions?.thickness_or_wall_thickness_mm,
+            part.dimensions?.width_mm ?? part.dimensions?.outer_diameter_mm,
+            part.dimensions?.thickness_mm,
             net,
             scrap,
             gross,
@@ -1240,8 +1221,8 @@ export default function App() {
             String(part.component_type || '-').toUpperCase(),
             qty,
             part.dimensions?.length_mm,
-            part.dimensions?.width_or_outer_dia_mm,
-            part.dimensions?.thickness_or_wall_thickness_mm,
+            part.dimensions?.width_mm ?? part.dimensions?.outer_diameter_mm,
+            part.dimensions?.thickness_mm,
             net,
             scrap,
             gross,
@@ -1491,9 +1472,9 @@ export default function App() {
           part.material_code || '-',
           part.per_set_qty,
           part.dimensions?.length_mm,
-          part.dimensions?.width_or_outer_dia_mm,
-          part.dimensions?.secondary_width_mm,
-          part.dimensions?.thickness_or_wall_thickness_mm,
+          part.dimensions?.width_mm,
+          part.dimensions?.height_mm ?? part.dimensions?.outer_diameter_mm,
+          part.dimensions?.thickness_mm,
           part.surface_area_sq_meter,
           part.bends_per_part,
           part.cutting_metrics?.laser_cutting_length_mm,
@@ -1851,6 +1832,43 @@ export default function App() {
     });
   };
 
+  const captureAiJson = (
+    label: string,
+    payload: unknown,
+    fileName?: string,
+    stableId?: string,
+    endpoint?: string,
+    description?: string,
+  ) => {
+    if (payload === undefined || payload === null) return;
+    const metadata: Record<string, { endpoint: string; description: string }> = {
+      'Reference extraction': {
+        endpoint: '/batch-extract-references',
+        description: 'Finds child and detail drawing references, drawing numbers, and expected filenames printed in uploaded drawings.',
+      },
+      'Structured extraction': {
+        endpoint: '/extract-structured',
+        description: 'Returns the detailed part-by-part BOM, dimensions, quantities, materials, bends, cutting metrics, welding data, image regions, notes, and references.',
+      },
+      'Drawing BOM': {
+        endpoint: '/process-drawing',
+        description: 'Returns the legacy calibrated BOM used for component weights, manufacturing routing, reports, and generated visuals.',
+      },
+    };
+    const details = metadata[label] || { endpoint: 'Unknown endpoint', description: 'Raw JSON returned by the AI service.' };
+    const entry: AiJsonEntry = {
+      id: stableId || `${label}-${fileName || 'response'}-${Date.now()}-${Math.random()}`,
+      label,
+      endpoint: endpoint || details.endpoint,
+      description: description || details.description,
+      fileName,
+      payload,
+    };
+    setAiJsonEntries(previous => stableId
+      ? [...previous.filter(item => item.id !== stableId), entry]
+      : [...previous, entry]);
+  };
+
   const structuredNamedStepsFor = (part: StructuredBreakdown['per_part_breakdown'][number], names: string[]) => {
     const normalizedNames = names.map(name => name.toLowerCase());
     return mapStructuredSteps(part.calculation_steps).filter(step => {
@@ -2048,9 +2066,9 @@ export default function App() {
     const dims = part.dimensions || {};
     return [
       dims.length_mm,
-      dims.width_or_outer_dia_mm,
-      dims.secondary_width_mm,
-      dims.thickness_or_wall_thickness_mm,
+      dims.width_mm,
+      dims.height_mm ?? dims.outer_diameter_mm,
+      dims.thickness_mm,
     ].filter(value => value !== undefined && value !== null && Number(value) > 0).join(' x ') || '-';
   };
 
@@ -2066,9 +2084,10 @@ export default function App() {
     };
 
     addMetric('Length', dims.length_mm);
-    addMetric('Width / OD', dims.width_or_outer_dia_mm);
-    addMetric('Height / B', dims.secondary_width_mm);
-    addMetric('Thickness', dims.thickness_or_wall_thickness_mm);
+    addMetric('Width', dims.width_mm);
+    addMetric('Height', dims.height_mm);
+    addMetric('Outer diameter', dims.outer_diameter_mm);
+    addMetric('Thickness', dims.thickness_mm);
     return badges;
   };
 
@@ -2270,9 +2289,9 @@ export default function App() {
     const svgToDataUri = (svg: string) => `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
     const dims = part?.dimensions || {};
     const length = Number(dims.length_mm || 0);
-    const width = Number(dims.width_or_outer_dia_mm || 0);
-    const secondary = Number(dims.secondary_width_mm || 0);
-    const thickness = Number(dims.thickness_or_wall_thickness_mm || 0);
+    const width = Number(dims.width_mm || dims.outer_diameter_mm || 0);
+    const secondary = Number(dims.height_mm || 0);
+    const thickness = Number(dims.thickness_mm || 0);
     const qty = Number(part?.per_set_qty || 1);
     const title = (part?.component_name || part?.tube_type || part?.component_type || 'Part reference').toUpperCase();
     const dimensionLine = structuredDimensions(part as StructuredBreakdown['per_part_breakdown'][number] || ({} as StructuredBreakdown['per_part_breakdown'][number]));
@@ -2748,6 +2767,13 @@ export default function App() {
         </div>
       )}
 
+      <AiJsonViewer
+        entries={aiJsonEntries}
+        open={isAiJsonViewerOpen}
+        onClose={() => setIsAiJsonViewerOpen(false)}
+        onClear={() => setAiJsonEntries([])}
+      />
+
       {/* Top Navigation Bar */}
       <header className="sticky top-0 z-50 flex justify-between items-center w-full px-6 h-16 bg-white border-b border-[#c3c6d8] shadow-sm">
         <div className="flex items-center gap-8">
@@ -2802,7 +2828,19 @@ export default function App() {
           </nav>
         </div>
 
-        <ExportActions
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsAiJsonViewerOpen(true)}
+            className="relative flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-black uppercase tracking-wider text-slate-600 transition hover:border-[#004ccd] hover:text-[#004ccd]"
+            title="View raw JSON returned by AI"
+          >
+            <FileJson className="h-4 w-4" /> AI JSON
+            {aiJsonEntries.length > 0 && (
+              <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#004ccd] px-1 text-[9px] text-white">{aiJsonEntries.length}</span>
+            )}
+          </button>
+          <ExportActions
           currentScreen={currentScreen}
           avatarUrl={DEFAULT_AVATAR_URL}
           showBackToFileList={currentScreen === 'workspace' && batchUploadFiles.length > 0 && isBatchReady}
@@ -2823,7 +2861,8 @@ export default function App() {
           }}
           onExportReport={handleExport}
           onExportFormula={handleExportFormula}
-        />
+          />
+        </div>
       </header>
 
       {/* Main Content Area */}
@@ -4514,9 +4553,13 @@ export default function App() {
                                         </div>
                                         <div className="text-right flex items-center gap-3 flex-shrink-0">
                                           <div>
-                                          <div className="text-[10px] uppercase font-bold text-[#004ccd]">Set Total Laser</div>
+                                          <div className="text-[10px] uppercase font-bold text-[#004ccd]">
+                                            Set Total {params.processes.includes('Press') ? 'Press' : 'Laser'}
+                                          </div>
                                           <div className="text-sm font-black text-[#004ccd] font-mono">
-                                            {formatInr(part.calculated_costs.total_combined_set_cost_via_laser)}
+                                            {formatInr(params.processes.includes('Press')
+                                              ? part.calculated_costs.total_combined_set_cost_via_machine
+                                              : part.calculated_costs.total_combined_set_cost_via_laser)}
                                           </div>
                                           </div>
                                           <ChevronRight className="w-4 h-4 text-slate-400 transition-transform group-open:rotate-90" />
@@ -4585,6 +4628,29 @@ export default function App() {
                                               </div>
                                             </button>
                                           </div>
+                                        </div>
+
+                                        <div className="p-2 bg-violet-50/60 rounded border border-violet-100">
+                                          <div className="text-[9px] uppercase font-bold text-violet-700">Extracted Manufacturing Geometry</div>
+                                          {(part.holes?.length || part.flat_pattern?.holes?.length || part.slots?.length || part.flat_pattern?.slots?.length || part.threads?.length) ? (
+                                            <div className="mt-1 space-y-1 font-mono text-xs text-violet-950">
+                                              {[...(part.flat_pattern?.holes || part.holes || [])].map((hole, index) => (
+                                                <div key={`${part.part_number}-hole-${index}`}>
+                                                  {hole.quantity_per_part ?? '?'} x {hole.hole_type} hole{hole.diameter_mm != null ? ` dia ${hole.diameter_mm} mm` : ''}
+                                                </div>
+                                              ))}
+                                              {[...(part.flat_pattern?.slots || part.slots || [])].map((slot, index) => (
+                                                <div key={`${part.part_number}-slot-${index}`}>
+                                                  {slot.quantity_per_part ?? '?'} x {slot.slot_type} slot{slot.length_mm != null ? ` L${slot.length_mm} mm` : ''}{slot.width_mm != null ? ` W${slot.width_mm} mm` : ''}
+                                                </div>
+                                              ))}
+                                              {(part.threads || []).map((thread, index) => (
+                                                <div key={`${part.part_number}-thread-${index}`}>{thread.quantity_per_part ?? '?'} x thread {thread.thread_size || ''}</div>
+                                              ))}
+                                            </div>
+                                          ) : (
+                                            <div className="mt-1 font-mono text-xs text-slate-500">No verified holes, slots, or threads</div>
+                                          )}
                                         </div>
 
                                         <div className="grid grid-cols-2 gap-2">

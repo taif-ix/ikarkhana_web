@@ -82,20 +82,33 @@ export async function POST(request: Request) {
     formData.append('scrap_rate_per_kg', String(asNonNegativeNumber(params.scrapRate, 28)));
     formData.append('tacking_fixed_setup_cost', String(asNonNegativeNumber(params.tackingFixed, 0)));
 
-    const response = await fetch(`${API_BASE}/extract-cost-breakdown`, {
+    const extractionResponse = await fetch(`${API_BASE}/extract-structured`, {
       method: 'POST',
       body: formData,
     });
 
-    const payload = await response.json();
-    if (!response.ok) {
+    const extractionPayload = await extractionResponse.json();
+    if (!extractionResponse.ok) {
       return NextResponse.json(
-        { success: false, error: payload.detail || `Backend returned ${response.status}` },
-        { status: response.status }
+        { success: false, error: extractionPayload.detail || `Backend returned ${extractionResponse.status}` },
+        { status: extractionResponse.status }
       );
     }
 
-    return NextResponse.json({ success: true, data: payload });
+    const costingResponse = await fetch(`${API_BASE}/calculate-cost-breakdown`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(costPayload(params, extractionPayload)),
+    });
+    const costingPayload = await costingResponse.json();
+    if (!costingResponse.ok) {
+      return NextResponse.json(
+        { success: false, error: costingPayload.detail || `Backend returned ${costingResponse.status}` },
+        { status: costingResponse.status }
+      );
+    }
+
+    return NextResponse.json({ success: true, data: costingPayload, aiResponse: extractionPayload });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }

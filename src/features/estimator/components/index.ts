@@ -1,4 +1,6 @@
 export { BatchDependencyTable } from './BatchDependencyTable';
+export { AiJsonViewer } from './AiJsonViewer';
+export type { AiJsonEntry } from './AiJsonViewer';
 export { BatchProcessingList } from './BatchProcessingList';
 export { CalculationBreakdownModal } from './CalculationBreakdownModal';
 export { DiagramPreview } from './DiagramPreview';
