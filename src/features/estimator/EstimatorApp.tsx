@@ -4698,7 +4698,17 @@ export default function App() {
                                           </div>
                                           <div className="p-2 bg-slate-50 rounded border border-slate-100">
                                             <div className="text-[9px] uppercase font-bold text-slate-400">Material</div>
-                                            <div className="font-mono text-xs text-slate-800">{part.material_type || '-'} {part.material_code ? `(${part.material_code})` : ''}</div>
+                                            <div className="mt-1 space-y-0.5 font-mono text-xs text-slate-800">
+                                              {(part.material_type || part.material_code || part.material_grade || part.material_specification) ? (
+                                                <>
+                                                  {(part.material_type || part.material_code) && (
+                                                    <div>{part.material_type || ''}{part.material_code ? `${part.material_type ? ' ' : ''}(${part.material_code})` : ''}</div>
+                                                  )}
+                                                  {part.material_grade && <div>Grade: {part.material_grade}</div>}
+                                                  {part.material_specification && <div>Spec: {part.material_specification}</div>}
+                                                </>
+                                              ) : '-'}
+                                            </div>
                                           </div>
                                           <div className="p-2 bg-slate-50 rounded border border-slate-100">
                                             <div className="text-[9px] uppercase font-bold text-slate-400">Surface Area</div>

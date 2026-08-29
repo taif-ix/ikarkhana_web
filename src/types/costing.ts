@@ -90,6 +90,8 @@ export interface StructuredBreakdown {
     tube_type: string;
     material_type?: string | null;
     material_code?: string | null;
+    material_grade?: string | null;
+    material_specification?: string | null;
     per_set_qty: number;
     dimensions?: {
       length_mm?: number | null;
