@@ -3590,6 +3590,44 @@ export default function App() {
 
                 {/* Parameters Form fields list */}
                 <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
+                  <details className="group bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden">
+                    <summary className="flex items-center justify-between gap-3 p-4 cursor-pointer list-none hover:bg-slate-50 transition-colors">
+                      <div className="flex items-center gap-2 text-[#004ccd]">
+                        <Calculator className="w-4 h-4" />
+                        <div>
+                          <h3 className="font-bold text-xs uppercase tracking-widest">Calculation Presets</h3>
+                          <p className="mt-1 text-[10px] normal-case tracking-normal font-medium text-slate-500">Values currently used for costing</p>
+                        </div>
+                      </div>
+                      <span className="text-[10px] uppercase font-black text-[#004ccd] border border-blue-100 bg-blue-50 px-3 py-1.5 rounded group-open:bg-[#004ccd] group-open:text-white">
+                        View values
+                      </span>
+                    </summary>
+                    <div className="border-t border-slate-200 p-4 bg-slate-50">
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                        {[
+                          ['Material density', `${({ ms: 7.85, ss: 7.9, aluminium: 2.7, copper: 8.96 } as Record<string, number>)[params.rawMaterialType] || 7.9} g/cm3`],
+                          ['Material rate', `Rs ${params.materialRate || 0}/kg`],
+                          ['Scrap value', `Rs ${params.scrapRate || 0}/kg`],
+                          ['Laser cutting', `Rs ${params.cutRate || 0}/m`],
+                          ['Press machine', `Rs ${params.pressRate || 0}/hit`],
+                          ['Bending', `Rs ${params.bendRate || 0}/bend`],
+                          ['Painting', `Rs ${params.surfaceRate || 0}/m2`],
+                          ['Welding', `Rs ${params.weldRate || 0}/m`],
+                          ['Tacking setup', `Rs ${params.tackingFixed || 0} fixed`],
+                          ['Sheet stock', '2500 x 1250 mm'],
+                          ['Linear stock', '6000 mm'],
+                        ].map(([label, value]) => (
+                          <div key={label} className="rounded border border-slate-200 bg-white px-3 py-2">
+                            <div className="text-[9px] uppercase font-bold tracking-wider text-slate-500">{label}</div>
+                            <div className="mt-1 font-mono text-xs font-black text-slate-900">{value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="mt-3 text-[10px] text-slate-500">Rates follow the editable fields below. Density and stock sizes are backend calculation defaults.</p>
+                    </div>
+                  </details>
+
                   <div className="space-y-3 p-4 bg-white border border-slate-200 rounded-lg shadow-sm">
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-2 text-[#004ccd]">
